@@ -9,16 +9,29 @@
   "categories": [
     "Other"
   ],
-
   "activationEvents": [
-    "onCommand:debugAssistant.explainError",
-    "onCommand:debugAssistant.explainSelection",
-    "onCommand:debugAssistant.reflectSolved"
-],
-
+    "onView:whybug.sidebar"
+  ],
   "main": "./dist/extension.js",
-
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "whybug-container",
+          "title": "WhyBug",
+          "icon": "media/bug.png"
+        }
+      ]
+    },
+    "views": {
+      "whybug-container": [
+        {
+          "type": "webview",
+          "id": "whybug.sidebar",
+          "name": "WhyBug AI"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "debugAssistant.explainError",
@@ -34,27 +47,20 @@
       }
     ]
   },
-
   "scripts": {
     "vscode:prepublish": "npm run package",
-
     "compile": "npm run check-types && npm run lint && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
-
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
-
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
-
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
   },
-
   "devDependencies": {
     "@types/vscode": "^1.116.0",
     "@types/mocha": "^10.0.10",

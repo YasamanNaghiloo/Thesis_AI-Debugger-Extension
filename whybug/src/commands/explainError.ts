@@ -1,9 +1,11 @@
 import * as vscode from "vscode";
 import { ErrorTracker } from "../services/errorTracker";
 import { DebugAssistantService } from "../services/debugAssistantService";
+import { SidebarProvider } from "../ui/sidebarProvider";
 
 export function registerExplainError(
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
+  sidebar: SidebarProvider
 ): vscode.Disposable {
   const tracker = new ErrorTracker(context);
   const assistant = new DebugAssistantService();
@@ -12,10 +14,7 @@ export function registerExplainError(
     "debugAssistant.explainError",
     async () => {
       const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        vscode.window.showErrorMessage("No active editor found.");
-        return;
-      }
+      if (!editor) return;
 
       const code = editor.document.getText();
 
@@ -28,7 +27,7 @@ export function registerExplainError(
       const count = await tracker.incrementError(error);
       const reply = await assistant.explainError(error, code, count);
 
-      vscode.window.showInformationMessage(reply);
+      sidebar.update(reply);
     }
   );
 }
