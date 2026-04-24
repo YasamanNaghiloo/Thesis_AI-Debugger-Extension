@@ -1,0 +1,43 @@
+{
+  "name": "ai-debugging-assistant",
+  "displayName": "AI Debugging Assistant",
+  "description": "AI tutoring assistant for beginner programmers debugging code",
+  "version": "0.0.1",
+  "publisher": "student-project",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:debugAssistant.explainError",
+    "onCommand:debugAssistant.explainSelection",
+    "onCommand:debugAssistant.reflectSolved"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "debugAssistant.explainError",
+        "title": "AI Debug: Explain Current Error"
+      },
+      {
+        "command": "debugAssistant.explainSelection",
+        "title": "AI Debug: Explain Selected Code"
+      },
+      {
+        "command": "debugAssistant.reflectSolved",
+        "title": "AI Debug: Reflect On Solved Bug"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/node": "^20.12.12",
+    "@types/vscode": "^1.90.0"
+  }
+}
