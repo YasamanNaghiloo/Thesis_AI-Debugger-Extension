@@ -1,7 +1,7 @@
 {
   "name": "whybug",
   "displayName": "WhyBug",
-  "description": "This extension uses AI to support debugging and code comprehension for noive developers.",
+  "description": "AI-powered debugging assistant for beginner programmers using local LLMs (Ollama).",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.116.0"
@@ -9,30 +9,52 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+
+  "activationEvents": [
+    "onCommand:debugAssistant.explainError",
+    "onCommand:debugAssistant.explainSelection",
+    "onCommand:debugAssistant.reflectSolved"
+],
+
   "main": "./dist/extension.js",
+
   "contributes": {
     "commands": [
       {
-        "command": "whybug.helloWorld",
-        "title": "Hello World"
+        "command": "debugAssistant.explainError",
+        "title": "AI Debugger: Explain Error"
+      },
+      {
+        "command": "debugAssistant.explainSelection",
+        "title": "AI Debugger: Explain Selection"
+      },
+      {
+        "command": "debugAssistant.reflectSolved",
+        "title": "AI Debugger: Reflect on Solution"
       }
     ]
   },
+
   "scripts": {
     "vscode:prepublish": "npm run package",
+
     "compile": "npm run check-types && npm run lint && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
+
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
+
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
+
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
   },
+
   "devDependencies": {
     "@types/vscode": "^1.116.0",
     "@types/mocha": "^10.0.10",
