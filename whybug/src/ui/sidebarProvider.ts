@@ -4,54 +4,34 @@ import { ErrorTracker } from "../services/errorTracker";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "whybug.sidebar";
-
     private _view?: vscode.WebviewView;
     private assistant = new DebugAssistantService();
-    private tracker: ErrorTracker;
+    private isStreaming = false;
 
-    constructor(private readonly context: vscode.ExtensionContext) {
-        this.tracker = new ErrorTracker(context);
-    }
+    constructor(private readonly context: vscode.ExtensionContext) { }
 
     public resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
-        webviewView.webview.options = { 
-            enableScripts: true, 
-            localResourceRoots: [this.context.extensionUri] 
-        };
-        
+        webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
         webviewView.webview.html = this.getHtml();
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
+            if (data.command === 'stopGeneration') {
+                this.isStreaming = false;
+                return;
+            }
+
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
             const code = editor.document.getText();
 
             if (data.command === 'requestMoreHelp') {
-                this.postMessage("", true); // Clear UI and show "Thinking..."
-                
+                this.postMessage("", true);
                 try {
                     let response = "";
-                    
-                    // Explicitly define what each button does based on user action
-                    if (data.action === 'hint') {
-                        response = await this.assistant.askCustom(
-                            "Based on the current code, give me one tiny hint to help me find the bug myself. Do NOT show the solution.", 
-                            code
-                        );
-                    } 
-                    else if (data.action === 'term') {
-                        response = await this.assistant.askCustom(
-                            "Identify the technical programming terms related to the current error and explain them simply.", 
-                            code
-                        );
-                    } 
-                    else if (data.action === 'eli5') {
-                        response = await this.assistant.askCustom(
-                            "Explain the current bug using a real-world analogy as if I am 5 years old. Do not provide the code fix.", 
-                            code
-                        );
-                    }
+                    if (data.action === 'hint') response = await this.assistant.askCustom("Give me a tiny hint. Do NOT solve it.", code);
+                    else if (data.action === 'term') response = await this.assistant.askCustom("Explain the technical terms simply.", code);
+                    else if (data.action === 'eli5') response = await this.assistant.askCustom("Explain this like I'm 5 with an analogy.", code);
 
                     this.streamResponse(response);
                 } catch (err) {
@@ -61,31 +41,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    /**
-     * Simulates a typewriter effect by sending text letter by letter to the webview
-     */
     public async streamResponse(fullText: string) {
+        this.isStreaming = true;
+        this.postMessage("", true);
         let currentText = "";
-        const characters = fullText.split("");
-        
-        for (const char of characters) {
+        for (const char of fullText.split("")) {
+            if (!this.isStreaming) break;
             currentText += char;
             this.postMessage(currentText, false);
-            // Delay of 10ms creates a smooth "AI typing" feel
             await new Promise(resolve => setTimeout(resolve, 10));
         }
+        this.isStreaming = false;
+        this._view?.webview.postMessage({ type: "finished" });
     }
 
-    public update(text: string) { 
-        this.postMessage(text, false); 
-    }
+    public update(text: string) { this.postMessage(text, false); }
 
     private postMessage(text: string, clear: boolean) {
-        this._view?.webview.postMessage({ 
-            type: "update", 
-            text: text, 
-            clear: clear 
-        });
+        this._view?.webview.postMessage({ type: "update", text, clear });
     }
 
     private getHtml() {
@@ -95,63 +68,61 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <head>
                 <meta charset="UTF-8">
                 <style>
-                    /* Ensure borders and padding are calculated correctly so nothing is cut off */
                     * { box-sizing: border-box; }
-                    
                     body {
                         font-family: var(--vscode-font-family);
-                        padding: 12px;
-                        margin: 0;
+                        padding: 12px; margin: 0;
                         color: var(--vscode-foreground);
-                        display: flex;
-                        flex-direction: column;
-                        height: 100vh;
-                        gap: 20px;
-                        overflow: hidden;
+                        display: flex; flex-direction: column;
+                        height: 100vh; 
+                        gap: 15px; 
+                        overflow: hidden; /* Prevent the whole sidebar from scrolling */
                     }
-                    
                     h3 { 
-                        font-size: 10px; 
-                        font-weight: bold; 
-                        text-transform: uppercase;
-                        margin: 0 0 10px 0; 
-                        opacity: 0.7; 
-                        color: var(--vscode-descriptionForeground);
+                        font-size: 10px; font-weight: bold; text-transform: uppercase;
+                        margin: 0; opacity: 0.7; color: var(--vscode-descriptionForeground);
                     }
-                    
+                    .header-row {
+                        display: flex; 
+                        justify-content: space-between; 
+                        align-items: center;
+                        margin-bottom: 8px; /* Space between header and text area */
+                        min-height: 20px;
+                    }
                     .button-group { 
-                        display: grid; 
-                        grid-template-columns: 1fr 1fr 1fr; 
-                        gap: 10px; 
+                        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
+                        flex-shrink: 0; /* Prevents buttons from squishing */
                     }
-                    
                     .tutor-btn {
                         background: var(--vscode-button-secondaryBackground);
                         color: var(--vscode-button-secondaryForeground);
-                        border: none; 
-                        padding: 15px 5px; 
+                        border: none; padding: 12px 5px; cursor: pointer;
+                        border-radius: 8px; display: flex; flex-direction: column;
+                        align-items: center; gap: 5px;
+                    }
+                    .tutor-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+                    .tutor-btn .emoji { font-size: 20px; }
+                    .tutor-btn .label { font-size: 12px; font-weight: bold; }
+
+                    #stopBtn {
+                        background: #d73a49; 
+                        color: white; 
+                        border: none;
+                        padding: 4px 10px; 
+                        border-radius: 4px; 
                         cursor: pointer;
-                        border-radius: 8px; 
-                        display: flex; 
-                        flex-direction: column;
-                        align-items: center; 
-                        gap: 8px;
-                        transition: background 0.2s;
+                        font-size: 10px; 
+                        font-weight: bold;
+                        display: none; /* Hidden by default */
+                        z-index: 10;
                     }
-                    
-                    .tutor-btn:hover { 
-                        background: var(--vscode-button-secondaryHoverBackground); 
-                    }
-                    
-                    .tutor-btn .emoji { font-size: 24px; }
-                    .tutor-btn .label { font-size: 14px; font-weight: bold; }
+                    #stopBtn:hover { background: #b92d3b; }
 
                     .output-container {
                         flex: 1; 
                         display: flex; 
                         flex-direction: column;
-                        overflow: hidden; 
-                        min-height: 0;
+                        min-height: 0; /* CRITICAL: allows container to be smaller than its content */
                     }
                     
                     #content {
@@ -159,17 +130,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         overflow-y: auto; 
                         white-space: pre-wrap;
                         background: var(--vscode-textBlockQuote-background);
-                        padding: 15px; 
+                        padding: 12px; 
                         border-radius: 6px;
                         border-left: 4px solid var(--vscode-button-background);
                         font-size: 13px; 
-                        line-height: 1.6;
+                        line-height: 1.5;
                         word-wrap: break-word;
                     }
                 </style>
             </head>
             <body>
-                <div>
+                <div style="flex-shrink: 0;">
                     <h3>Tutor Actions</h3>
                     <div class="button-group">
                         <button class="tutor-btn" onclick="requestAction('hint')">
@@ -188,26 +159,47 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 </div>
 
                 <div class="output-container">
-                    <h3>AI Guidance</h3>
-                    <div id="content">Run your code in the terminal to see errors...</div>
+                    <div class="header-row">
+                        <h3>AI Guidance</h3>
+                        <button id="stopBtn" onclick="stopGen()">⏹ STOP</button>
+                    </div>
+                    <div id="content">Run your code to see errors...</div>
                 </div>
 
                 <script>
                     const vscode = acquireVsCodeApi();
                     const content = document.getElementById("content");
+                    const stopBtn = document.getElementById("stopBtn");
+                    let userIsScrolling = false;
+
+                    content.addEventListener('wheel', () => {
+                        userIsScrolling = true;
+                        setTimeout(() => { userIsScrolling = false; }, 2000);
+                    });
 
                     function requestAction(type) {
                         vscode.postMessage({ command: 'requestMoreHelp', action: type });
                     }
 
+                    function stopGen() {
+                        vscode.postMessage({ command: 'stopGeneration' });
+                        stopBtn.style.display = "none";
+                    }
+
                     window.addEventListener("message", event => {
                         const message = event.data;
-                        if (message.clear) {
-                            content.innerText = "🤔 Thinking...";
-                        } else {
-                            content.innerText = message.text;
-                            // Auto-scroll to the bottom as text streams in
-                            content.scrollTop = content.scrollHeight;
+                        if (message.type === "update") {
+                            if (message.clear) {
+                                content.innerText = "🤔 Thinking...";
+                                stopBtn.style.display = "inline-block"; // Show STOP button
+                            } else {
+                                content.innerText = message.text;
+                                if (!userIsScrolling) {
+                                    content.scrollTop = content.scrollHeight;
+                                }
+                            }
+                        } else if (message.type === "finished") {
+                            stopBtn.style.display = "none"; // Hide STOP button
                         }
                     });
                 </script>
