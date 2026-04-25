@@ -28,59 +28,105 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(registerReflectSolved(sidebar));
 
     // ============================================================
-    // AUTO-DIAGNOSTICS WITH DEBOUNCE
+    // 1. AUTO-DIAGNOSTICS (STATIC ERRORS - "Red Squiggles")
     // ============================================================
     let diagnosticTimeout: NodeJS.Timeout | undefined;
 
     const diagnosticListener = vscode.languages.onDidChangeDiagnostics(
-        async (event) => {
-            // Clear the previous timer if the user is still typing/triggering errors
+        async (event: vscode.DiagnosticChangeEvent) => {
             if (diagnosticTimeout) {
                 clearTimeout(diagnosticTimeout);
             }
 
-            // Wait 1500ms (1.5s) after the last change before calling the AI
             diagnosticTimeout = setTimeout(async () => {
                 for (const uri of event.uris) {
                     const diagnostics = vscode.languages.getDiagnostics(uri);
-
-                    // Filter for actual Errors only
                     const errors = diagnostics.filter(
                         (d) => d.severity === vscode.DiagnosticSeverity.Error
                     );
 
-                    // If no errors, we don't need to do anything
                     if (errors.length === 0) continue;
 
                     const editor = vscode.window.activeTextEditor;
-                    // Check if we are looking at the file that actually has the error
                     if (!editor || editor.document.uri.toString() !== uri.toString()) continue;
 
                     const code = editor.document.getText();
                     const firstError = errors[0].message;
 
                     try {
-                        // 1. Track the error frequency
                         const count = await tracker.incrementError(firstError);
-                        
-                        // 2. Notify sidebar we are working
-                        sidebar.update("🔍 Analyzing your code...");
-
-                        // 3. Get AI explanation (automatically handles ELI5 if count >= 5)
+                        sidebar.update("🔍 Analyzing code diagnostics...");
                         const response = await assistant.explainError(firstError, code, count);
-                        
-                        // 4. Update the Sidebar UI
-                        sidebar.update(response);
+                        sidebar.streamResponse(response);
                     } catch (err) {
-                        console.error("WhyBug Error:", err);
-                        sidebar.update("⚠️ AI error. Is Ollama running with 'gemma3'?");
+                        sidebar.update("⚠️ AI error. Is Ollama running?");
                     }
                 }
-            }, 1500); // 1.5 second delay
+            }, 1500); 
         }
     );
 
-    context.subscriptions.push(diagnosticListener);
+    // ============================================================
+    // 2. DEBUGGER LISTENERS (RUNTIME CRASHES)
+    // ============================================================
+    
+    const debugListener = vscode.debug.onDidTerminateDebugSession(() => {
+        vscode.window.showInformationMessage("Debug session ended. Did WhyBug help you solve it?");
+    });
+
+    const exceptionListener = vscode.debug.onDidReceiveDebugSessionCustomEvent(async (event) => {
+        if (event.event === 'stopped' && event.body.reason === 'exception') {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+
+            const code = editor.document.getText();
+            const errorMessage = event.body.description || "An execution error occurred.";
+
+            sidebar.update("🕵️ Debugger caught a crash! Let's look...");
+
+            try {
+                const count = await tracker.incrementError(errorMessage);
+                const response = await assistant.explainError(errorMessage, code, count);
+                sidebar.streamResponse(response);
+            } catch (err) {
+                sidebar.update("⚠️ AI error during live debug session.");
+            }
+        }
+    });
+
+    // ============================================================
+    // 3. TERMINAL EXIT LISTENER (STABLE API)
+    // ============================================================
+    // This watches for when a command (like 'python app.py') ends with an error
+    const terminalListener = (vscode.window as any).onDidEndTerminalShellExecution ? 
+        (vscode.window as any).onDidEndTerminalShellExecution(async (event: any) => {
+            if (event.exitCode !== 0) {
+                const editor = vscode.window.activeTextEditor;
+                if (!editor) return;
+
+                const code = editor.document.getText();
+                const commandLine = event.execution.commandLine.value;
+
+                sidebar.update(`📟 Terminal command failed: "${commandLine}"`);
+                
+                try {
+                    const errorMsg = `Command "${commandLine}" failed with exit code ${event.exitCode}.`;
+                    const count = await tracker.incrementError(errorMsg);
+                    const response = await assistant.explainError(errorMsg, code, count);
+                    sidebar.streamResponse(response);
+                } catch (err) {
+                    console.error("WhyBug Terminal Error:", err);
+                }
+            }
+        }) : { dispose: () => {} };
+
+    // Add all listeners to subscriptions
+    context.subscriptions.push(
+        diagnosticListener, 
+        debugListener, 
+        exceptionListener, 
+        terminalListener
+    );
 
     vscode.window.showInformationMessage("WhyBug AI Debugger running 🚀");
 }
