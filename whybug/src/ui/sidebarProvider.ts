@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { DebugAssistantService } from "../services/debugAssistantService";
-import { ErrorTracker } from "../services/errorTracker";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "whybug.sidebar";
@@ -67,6 +66,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <html lang="en">
             <head>
                 <meta charset="UTF-8">
+                <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
                 <style>
                     * { box-sizing: border-box; }
                     body {
@@ -76,7 +76,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         display: flex; flex-direction: column;
                         height: 100vh; 
                         gap: 15px; 
-                        overflow: hidden; /* Prevent the whole sidebar from scrolling */
+                        overflow: hidden;
                     }
                     h3 { 
                         font-size: 10px; font-weight: bold; text-transform: uppercase;
@@ -86,12 +86,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         display: flex; 
                         justify-content: space-between; 
                         align-items: center;
-                        margin-bottom: 8px; /* Space between header and text area */
+                        margin-bottom: 8px;
                         min-height: 20px;
                     }
                     .button-group { 
                         display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
-                        flex-shrink: 0; /* Prevents buttons from squishing */
+                        flex-shrink: 0;
                     }
                     .tutor-btn {
                         background: var(--vscode-button-secondaryBackground);
@@ -113,22 +113,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         cursor: pointer;
                         font-size: 10px; 
                         font-weight: bold;
-                        display: none; /* Hidden by default */
-                        z-index: 10;
+                        display: none;
                     }
-                    #stopBtn:hover { background: #b92d3b; }
 
                     .output-container {
                         flex: 1; 
                         display: flex; 
                         flex-direction: column;
-                        min-height: 0; /* CRITICAL: allows container to be smaller than its content */
+                        min-height: 0;
                     }
                     
                     #content {
                         flex: 1; 
                         overflow-y: auto; 
-                        white-space: pre-wrap;
                         background: var(--vscode-textBlockQuote-background);
                         padding: 12px; 
                         border-radius: 6px;
@@ -137,6 +134,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         line-height: 1.5;
                         word-wrap: break-word;
                     }
+
+                    /* Markdown Specific Styles */
+                    #content strong { 
+                        color: var(--vscode-symbolIcon-keywordForeground); 
+                        font-weight: bold;
+                    }
+                    #content ul { margin: 0; padding-left: 18px; }
+                    #content li { margin-bottom: 10px; }
+                    #content p { margin: 0 0 10px 0; }
                 </style>
             </head>
             <body>
@@ -190,16 +196,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const message = event.data;
                         if (message.type === "update") {
                             if (message.clear) {
-                                content.innerText = "🤔 Thinking...";
-                                stopBtn.style.display = "inline-block"; // Show STOP button
+                                content.innerHTML = "🤔 <i>Thinking...</i>";
+                                stopBtn.style.display = "inline-block";
                             } else {
-                                content.innerText = message.text;
+                                // Convert Markdown to HTML
+                                content.innerHTML = marked.parse(message.text);
+                                
                                 if (!userIsScrolling) {
                                     content.scrollTop = content.scrollHeight;
                                 }
                             }
                         } else if (message.type === "finished") {
-                            stopBtn.style.display = "none"; // Hide STOP button
+                            stopBtn.style.display = "none";
                         }
                     });
                 </script>
