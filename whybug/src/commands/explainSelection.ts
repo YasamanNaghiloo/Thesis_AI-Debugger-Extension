@@ -16,13 +16,12 @@ export function registerExplainSelection(
       const selectedText = editor.document.getText(editor.selection);
       if (!selectedText) return;
 
-      const reply = await assistant.explainError(
-        "Explain this selected code",
-        selectedText,
-        0
-      );
-
-      sidebar.update(reply);
+      try {
+        const reply = await assistant.explainSelectedCode(selectedText);
+        sidebar.update(reply);
+      } catch (err) {
+        sidebar.update("⚠️ AI error. Is Ollama running?");
+      }
     }
   );
 }
