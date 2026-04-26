@@ -30,7 +30,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     let response = "";
                     if (data.action === 'hint') response = await this.assistant.askCustom("Give me a tiny hint. Do NOT solve it.", code);
                     else if (data.action === 'term') response = await this.assistant.askCustom("Explain the technical terms simply.", code);
-                    else if (data.action === 'eli5') response = await this.assistant.askCustom("Explain this like I'm 5 with an analogy.", code);
 
                     this.streamResponse(response);
                 } catch (err) {
@@ -90,7 +89,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         min-height: 20px;
                     }
                     .button-group { 
-                        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
+                        display: grid; grid-template-columns: 1fr 1fr; gap: 10px; 
                         flex-shrink: 0;
                     }
                     .tutor-btn {
@@ -156,10 +155,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         <button class="tutor-btn" onclick="requestAction('term')">
                             <span class="emoji">📖</span>
                             <span class="label">Terms</span>
-                        </button>
-                        <button class="tutor-btn" onclick="requestAction('eli5')">
-                            <span class="emoji">🐥</span>
-                            <span class="label">ELI5</span>
                         </button>
                     </div>
                 </div>
