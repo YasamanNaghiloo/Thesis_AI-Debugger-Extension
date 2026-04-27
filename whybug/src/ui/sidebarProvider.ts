@@ -191,7 +191,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const message = event.data;
                         if (message.type === "update") {
                             if (message.clear) {
-                                content.innerHTML = "🤔 <i>Thinking...</i>";
+                                content.innerHTML = "<i>Thinking...</i>";
                                 stopBtn.style.display = "inline-block";
                             } else {
                                 // Convert Markdown to HTML

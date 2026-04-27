@@ -17,13 +17,13 @@ export class TerminalOutputCapture {
         // Listen for new terminals
         this.disposables.push(
             vscode.window.onDidOpenTerminal((terminal) => {
-                console.log("📂 New terminal opened");
+                console.log("New terminal opened");
                 this.outputBuffer.set(terminal, "");
             })
         );
 
         if ((vscode.window as any).onDidStartTerminalShellExecution) {
-            console.log("✅ onDidStartTerminalShellExecution API available");
+            console.log("onDidStartTerminalShellExecution API available");
             this.disposables.push(
                 (vscode.window as any).onDidStartTerminalShellExecution((event: any) => {
                     const terminal = event.terminal as vscode.Terminal;
@@ -32,7 +32,7 @@ export class TerminalOutputCapture {
                 })
             );
         } else {
-            console.warn("⚠️ onDidStartTerminalShellExecution API NOT available");
+            console.warn("onDidStartTerminalShellExecution API NOT available");
         }
 
         // Listen for closed terminals
@@ -45,7 +45,7 @@ export class TerminalOutputCapture {
 
         // Listen for terminal output (if API available)
         if ((vscode.window as any).onDidWriteTerminalData) {
-            console.log("✅ onDidWriteTerminalData API available");
+            console.log("onDidWriteTerminalData API available");
             this.disposables.push(
                 (vscode.window as any).onDidWriteTerminalData((event: any) => {
                     const terminal = event.terminal;
@@ -60,7 +60,7 @@ export class TerminalOutputCapture {
                 })
             );
         } else {
-            console.warn("⚠️ onDidWriteTerminalData API NOT available");
+            console.warn("onDidWriteTerminalData API NOT available");
         }
     }
 
@@ -70,7 +70,7 @@ export class TerminalOutputCapture {
      */
     public extractErrorTypes(output: string): string[] {
         if (!output || output.length === 0) {
-            console.log("⚠️ No terminal output to parse");
+            console.log("No terminal output to parse");
             return [];
         }
 
@@ -87,7 +87,7 @@ export class TerminalOutputCapture {
                 .filter(e => e.length > 0);
             
             const unique = [...new Set(errorTypes)];
-            console.log("✅ Python error types extracted:", unique);
+            console.log("Python error types extracted:", unique);
             return unique;
         }
 
@@ -97,11 +97,11 @@ export class TerminalOutputCapture {
         
         if (generalMatches) {
             const unique = [...new Set(generalMatches)];
-            console.log("✅ General error types extracted:", unique);
+            console.log("General error types extracted:", unique);
             return unique;
         }
 
-        console.log("❌ No error patterns found in output");
+        console.log("No error patterns found in output");
         return [];
     }
 
@@ -110,7 +110,7 @@ export class TerminalOutputCapture {
      */
     public getOutputForTerminal(terminal: vscode.Terminal): string {
         const output = this.outputBuffer.get(terminal) || "";
-        console.log("📊 Terminal output length:", output.length);
+        console.log("Terminal output length:", output.length);
         return output;
     }
 
@@ -120,7 +120,7 @@ export class TerminalOutputCapture {
     public getLastOutput(): string {
         const terminals = vscode.window.terminals;
         if (terminals.length === 0) {
-            console.log("⚠️ No terminals available");
+            console.log("No terminals available");
             return "";
         }
 
@@ -133,7 +133,7 @@ export class TerminalOutputCapture {
      */
     public clearTerminal(terminal: vscode.Terminal) {
         this.outputBuffer.set(terminal, "");
-        console.log("🧹 Cleared terminal buffer for execution");
+        console.log("Cleared terminal buffer for execution");
     }
 
     /**
@@ -143,11 +143,11 @@ export class TerminalOutputCapture {
         this.outputBuffer.forEach((_, terminal) => {
             this.outputBuffer.set(terminal, "");
         });
-        console.log("🧹 Terminal output buffer cleared");
+        console.log("Terminal output buffer cleared");
     }
 
     public dispose() {
         this.disposables.forEach(d => d.dispose());
-        console.log("🛑 TerminalOutputCapture disposed");
+        console.log("TerminalOutputCapture disposed");
     }
 }
