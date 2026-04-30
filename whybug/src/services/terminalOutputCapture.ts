@@ -28,7 +28,7 @@ export class TerminalOutputCapture {
                 (vscode.window as any).onDidStartTerminalShellExecution((event: any) => {
                     const terminal = event.terminal as vscode.Terminal;
                     this.outputBuffer.set(terminal, "");
-                    console.log("▶️ Terminal shell execution started; buffer cleared.");
+                    console.log("Terminal shell execution started; buffer cleared.");
                 })
             );
         } else {
@@ -38,7 +38,7 @@ export class TerminalOutputCapture {
         // Listen for closed terminals
         this.disposables.push(
             vscode.window.onDidCloseTerminal((terminal) => {
-                console.log("📂 Terminal closed");
+                console.log("Terminal closed");
                 this.outputBuffer.delete(terminal);
             })
         );
@@ -56,7 +56,7 @@ export class TerminalOutputCapture {
                     const current = this.outputBuffer.get(terminal) || "";
                     const updated = current + data;
                     this.outputBuffer.set(terminal, updated);
-                    console.log("📝 Terminal data captured, buffer size:", updated.length);
+                    console.log("Terminal data captured, buffer size:", updated.length);
                 })
             );
         } else {
