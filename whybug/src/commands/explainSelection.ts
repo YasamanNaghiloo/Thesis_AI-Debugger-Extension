@@ -3,10 +3,9 @@ import { DebugAssistantService } from "../services/debugAssistantService";
 import { SidebarProvider } from "../ui/sidebarProvider";
 
 export function registerExplainSelection(
-  sidebar: SidebarProvider
+  sidebar: SidebarProvider,
+  assistant: DebugAssistantService
 ): vscode.Disposable {
-  const assistant = new DebugAssistantService();
-
   return vscode.commands.registerCommand(
     "debugAssistant.explainSelection",
     async () => {
