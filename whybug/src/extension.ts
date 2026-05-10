@@ -10,9 +10,9 @@ import { TerminalOutputCapture } from "./services/terminalOutputCapture";
 export function activate(context: vscode.ExtensionContext) {
     console.log("🔥 WhyBug ACTIVATED");
 
-    const sidebar = new SidebarProvider(context);
+    const assistant = new DebugAssistantService(context);
+    const sidebar = new SidebarProvider(context, assistant);
     const tracker = new ErrorTracker(context);
-    const assistant = new DebugAssistantService();
     const terminalCapture = new TerminalOutputCapture();
     terminalCapture.start();
     const executionOutput = new WeakMap<any, string>();
@@ -30,9 +30,9 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar)
     );
 
-    context.subscriptions.push(registerExplainError(context, sidebar));
-    context.subscriptions.push(registerExplainSelection(sidebar));
-    context.subscriptions.push(registerReflectSolved(sidebar));
+    context.subscriptions.push(registerExplainError(context, sidebar, assistant));
+    context.subscriptions.push(registerExplainSelection(sidebar, assistant));
+    context.subscriptions.push(registerReflectSolved(sidebar, assistant));
 
     let terminalStartListener: any = { dispose: () => {} };
     if ((vscode.window as any).onDidStartTerminalShellExecution) {
