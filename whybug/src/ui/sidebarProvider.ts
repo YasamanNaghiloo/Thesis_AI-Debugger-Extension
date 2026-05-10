@@ -4,10 +4,9 @@ import { DebugAssistantService } from "../services/debugAssistantService";
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "whybug.sidebar";
     private _view?: vscode.WebviewView;
-    private assistant = new DebugAssistantService();
     private isStreaming = false;
 
-    constructor(private readonly context: vscode.ExtensionContext) { }
+    constructor(private readonly context: vscode.ExtensionContext, private assistant: DebugAssistantService) { }
 
     public resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
@@ -30,6 +29,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     let response = "";
                     if (data.action === 'hint') response = await this.assistant.askCustom("Give me a tiny hint. Do NOT solve it.", code);
                     else if (data.action === 'term') response = await this.assistant.askCustom("Explain the technical terms simply.", code);
+                    else if (data.action === 'analytics') {
+                        const analytics = this.assistant.getErrorAnalytics();
+                        response = this.formatAnalytics(analytics);
+                    }
 
                     this.streamResponse(response);
                 } catch (err) {
@@ -57,6 +60,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private postMessage(text: string, clear: boolean) {
         this._view?.webview.postMessage({ type: "update", text, clear });
+    }
+
+    private formatAnalytics(analytics: any[]): string {
+        if (analytics.length === 0) {
+            return "No errors tracked yet. Make some mistakes to see your error levels!";
+        }
+
+        const levelLabels = ["🟢 Level 0", "🟡 Level 1", "🔴 Level 2"];
+        const lines = analytics.map(a => {
+            const levelLabel = levelLabels[a.currentLevel] || "Unknown";
+            return `• **${a.errorType}**: ${levelLabel} (Score: ${a.totalScore.toFixed(2)}, Recent: ${a.recentCount})`;
+        });
+
+        return `## Your Error Profile\n\n${lines.join("\n")}\n\n*Levels are determined by how often you repeat each specific error. Higher levels get more detailed explanations.*`;
     }
 
     private getHtml() {
@@ -89,7 +106,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         min-height: 20px;
                     }
                     .button-group { 
-                        display: grid; grid-template-columns: 1fr 1fr; gap: 10px; 
+                        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; 
                         flex-shrink: 0;
                     }
                     .tutor-btn {
@@ -155,6 +172,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         <button class="tutor-btn" onclick="requestAction('term')">
                             <span class="emoji">📖</span>
                             <span class="label">Terms</span>
+                        </button>
+                        <button class="tutor-btn" onclick="requestAction('analytics')">
+                            <span class="emoji">📊</span>
+                            <span class="label">Analytics</span>
                         </button>
                     </div>
                 </div>
