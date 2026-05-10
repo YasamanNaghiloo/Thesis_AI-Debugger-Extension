@@ -67,13 +67,51 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return "No errors tracked yet. Make some mistakes to see your error levels!";
         }
 
-        const levelLabels = ["🟢 Level 0", "🟡 Level 1", "🔴 Level 2"];
-        const lines = analytics.map(a => {
-            const levelLabel = levelLabels[a.currentLevel] || "Unknown";
-            return `• **${a.errorType}**: ${levelLabel} (Score: ${a.totalScore.toFixed(2)}, Recent: ${a.recentCount})`;
-        });
+        const errorBlocks = analytics.map((a, idx) => {
+            const timestampLines = a.timestamps.map((ts: number) => {
+                const relativeTime = this.getRelativeTime(ts);
+                const date = new Date(ts);
+                const timeStr = date.toLocaleString();
+                return `<div class="timestamp-item">${relativeTime} — ${timeStr}</div>`;
+            }).join("");
 
-        return `## Your Error Profile\n\n${lines.join("\n")}\n\n*Levels are determined by how often you repeat each specific error. Higher levels get more detailed explanations.*`;
+            return `
+            <div class="accordion-item">
+                <div class="accordion-header" onclick="toggleAccordion(${idx})">
+                    <span class="accordion-chevron" id="chevron-${idx}">▶</span>
+                    <span class="accordion-title"><strong>${a.errorType}</strong></span>
+                    <span class="accordion-score">Score: ${a.totalScore.toFixed(2)}</span>
+                </div>
+                <div class="accordion-content" id="content-${idx}" style="display: none;">
+                    ${timestampLines}
+                </div>
+            </div>
+            `;
+        }).join("");
+
+        return `
+        <div id="analytics-container">
+            <h2 style="margin-top: 0;">Your Error Profile</h2>
+            <p style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 15px;">
+                Click the arrow to expand and see when you made each mistake.
+            </p>
+            ${errorBlocks}
+        </div>
+        `;
+    }
+
+    private getRelativeTime(timestampMs: number): string {
+        const now = Date.now();
+        const diffMs = now - timestampMs;
+        const diffSec = Math.floor(diffMs / 1000);
+        const diffMin = Math.floor(diffSec / 60);
+        const diffHour = Math.floor(diffMin / 60);
+        const diffDay = Math.floor(diffHour / 24);
+
+        if (diffSec < 60) return `${diffSec}s ago`;
+        if (diffMin < 60) return `${diffMin}m ago`;
+        if (diffHour < 24) return `${diffHour}h ago`;
+        return `${diffDay}d ago`;
     }
 
     private getHtml() {
@@ -159,6 +197,75 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     #content ul { margin: 0; padding-left: 18px; }
                     #content li { margin-bottom: 10px; }
                     #content p { margin: 0 0 10px 0; }
+
+                    /* Accordion Styles */
+                    #analytics-container {
+                        width: 100%;
+                    }
+
+                    .accordion-item {
+                        margin-bottom: 12px;
+                        border-left: 3px solid var(--vscode-button-background);
+                        padding: 0 0 0 10px;
+                    }
+
+                    .accordion-header {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        padding: 8px 0;
+                        cursor: pointer;
+                        user-select: none;
+                        transition: opacity 0.2s;
+                    }
+
+                    .accordion-header:hover {
+                        opacity: 0.8;
+                    }
+
+                    .accordion-chevron {
+                        display: inline-block;
+                        font-size: 10px;
+                        transition: transform 0.2s;
+                        width: 10px;
+                        text-align: center;
+                    }
+
+                    .accordion-chevron.open {
+                        transform: rotate(90deg);
+                    }
+
+                    .accordion-title {
+                        flex: 1;
+                        font-weight: bold;
+                        color: var(--vscode-foreground);
+                    }
+
+                    .accordion-score {
+                        font-size: 11px;
+                        color: var(--vscode-descriptionForeground);
+                        margin-left: auto;
+                    }
+
+                    .accordion-content {
+                        display: none;
+                        padding: 8px 0 8px 10px;
+                        margin-bottom: 8px;
+                        border-left: 1px dashed var(--vscode-descriptionForeground);
+                        margin-left: -3px;
+                        padding-left: 13px;
+                    }
+
+                    .accordion-content.open {
+                        display: block;
+                    }
+
+                    .timestamp-item {
+                        font-size: 11px;
+                        color: var(--vscode-descriptionForeground);
+                        padding: 4px 0;
+                        word-wrap: break-word;
+                    }
                 </style>
             </head>
             <body>
@@ -208,6 +315,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         stopBtn.style.display = "none";
                     }
 
+                    let currentOpenAccordion = null;
+
+                    function toggleAccordion(index) {
+                        const content = document.getElementById("content-" + index);
+                        const chevron = document.getElementById("chevron-" + index);
+                        const isOpen = content.style.display !== "none";
+
+                        // Close the currently open accordion if it's a different one
+                        if (currentOpenAccordion !== null && currentOpenAccordion !== index) {
+                            const prevContent = document.getElementById("content-" + currentOpenAccordion);
+                            const prevChevron = document.getElementById("chevron-" + currentOpenAccordion);
+                            if (prevContent) {
+                                prevContent.style.display = "none";
+                                prevContent.classList.remove("open");
+                            }
+                            if (prevChevron) {
+                                prevChevron.classList.remove("open");
+                            }
+                        }
+
+                        // Toggle the clicked accordion
+                        if (isOpen) {
+                            content.style.display = "none";
+                            content.classList.remove("open");
+                            chevron.classList.remove("open");
+                            currentOpenAccordion = null;
+                        } else {
+                            content.style.display = "block";
+                            content.classList.add("open");
+                            chevron.classList.add("open");
+                            currentOpenAccordion = index;
+                        }
+                    }
+
                     window.addEventListener("message", event => {
                         const message = event.data;
                         if (message.type === "update") {
@@ -215,8 +356,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 content.innerHTML = "<i>Thinking...</i>";
                                 stopBtn.style.display = "inline-block";
                             } else {
-                                // Convert Markdown to HTML
-                                content.innerHTML = marked.parse(message.text);
+                                // Check if this is analytics (accordion) or regular markdown
+                                if (message.text.includes("analytics-container")) {
+                                    content.innerHTML = message.text;
+                                } else {
+                                    // Convert Markdown to HTML
+                                    content.innerHTML = marked.parse(message.text);
+                                }
                                 
                                 if (!userIsScrolling) {
                                     content.scrollTop = content.scrollHeight;
