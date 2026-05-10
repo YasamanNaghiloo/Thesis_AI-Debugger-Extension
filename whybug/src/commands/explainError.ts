@@ -5,10 +5,9 @@ import { SidebarProvider } from "../ui/sidebarProvider";
 
 export function registerExplainError(
   context: vscode.ExtensionContext,
-  sidebar: SidebarProvider
+  sidebar: SidebarProvider,
+  assistant: DebugAssistantService
 ): vscode.Disposable {
-  const assistant = new DebugAssistantService();
-
   return vscode.commands.registerCommand(
     "debugAssistant.explainError",
     async () => {
