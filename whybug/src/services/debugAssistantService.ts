@@ -12,6 +12,7 @@ export interface ErrorAnalytics {
     totalScore: number;
     currentLevel: number;
     lastSeenMs: number;
+    timestamps: number[];
 }
 
 interface ErrorState {
@@ -253,7 +254,8 @@ export class DebugAssistantService {
                 ).length,
                 totalScore: breakdown,
                 currentLevel: state.currentLevel,
-                lastSeenMs: state.lastSeenMs
+                lastSeenMs: state.lastSeenMs,
+                timestamps: state.timestamps
             });
         }
 
