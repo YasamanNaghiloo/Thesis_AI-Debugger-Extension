@@ -1,11 +1,47 @@
+import * as vscode from "vscode";
 import { OllamaProvider } from "../providers/OllamaProvider";
 import { 
     buildExplainErrorPrompt, 
     buildReflectionPrompt 
 } from "../prompts/promptBuilders";
+import { getHybridErrorScore } from "./errorAdaptation";
+
+export interface ErrorAnalytics {
+    errorType: string;
+    recentCount: number;
+    totalScore: number;
+    currentLevel: number;
+    lastSeenMs: number;
+}
+
+interface ErrorState {
+    timestamps: number[];
+    currentLevel: number;
+    lastSeenMs: number;
+}
 
 export class DebugAssistantService {
     private provider = new OllamaProvider();
+    private context?: vscode.ExtensionContext;
+
+    // Adaptive prompt configuration (in milliseconds)
+    private readonly WINDOW_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days
+    private readonly HALF_LIFE_MS = 14 * 24 * 60 * 60 * 1000;  // 14 days
+    private readonly MAX_TIMESTAMPS = 100;                      // cap storage
+
+    // Level thresholds: score < t0 → L0, t0 ≤ score < t1 → L1, score ≥ t1 → L2
+    private readonly LEVEL_THRESHOLDS = {
+        l1: 1.5,
+        l2: 4.0
+    };
+
+    // Per-error state: errorType → { timestamps, currentLevel, lastSeenMs }
+    private errorState: Map<string, ErrorState> = new Map();
+
+    constructor(context?: vscode.ExtensionContext) {
+        this.context = context;
+        if (this.context) this.loadPersistedState();
+    }
 
     private readonly errorTypeDefinitions: Record<string, { definition: string; context: string }> = {
         TypeError: {
@@ -110,6 +146,132 @@ export class DebugAssistantService {
     }
 
     /**
+     * Get the canonical error type (map aliases to their base type).
+     */
+    private getCanonicalErrorType(errorType: string): string {
+        return this.errorTypeAliases[errorType] || errorType;
+    }
+
+    /**
+     * Update error state when an error is encountered.
+     * Records a timestamp for this error type and recomputes its level.
+     */
+    private updateErrorState(errorType: string, nowMs: number = Date.now()): void {
+        const canonical = this.getCanonicalErrorType(errorType);
+        let state = this.errorState.get(canonical);
+        if (!state) {
+            state = { timestamps: [], currentLevel: 0, lastSeenMs: nowMs };
+            this.errorState.set(canonical, state);
+        }
+
+        state.timestamps.push(nowMs);
+        state.lastSeenMs = nowMs;
+
+        // Cap the stored timestamps to avoid unbounded growth
+        if (state.timestamps.length > this.MAX_TIMESTAMPS) {
+            state.timestamps = state.timestamps.slice(-this.MAX_TIMESTAMPS);
+        }
+
+        // Recompute level based on updated score
+        state.currentLevel = this.computeLevel(canonical);
+        // Persist updated state
+        try {
+            void this.savePersistedState();
+        } catch (e) {
+            console.warn("Failed to persist error state", e);
+        }
+    }
+
+    private loadPersistedState(): void {
+        if (!this.context) return;
+        try {
+            const raw = this.context.workspaceState.get<Record<string, any>>("whybug.errorState", {});
+            for (const [key, value] of Object.entries(raw || {})) {
+                const timestamps = Array.isArray(value.timestamps) ? value.timestamps.filter((t: any) => Number.isFinite(t)).map((t: any) => Number(t)) : [];
+                const currentLevel = typeof value.currentLevel === 'number' ? value.currentLevel : 0;
+                const lastSeenMs = typeof value.lastSeenMs === 'number' ? value.lastSeenMs : 0;
+                this.errorState.set(key, { timestamps, currentLevel, lastSeenMs });
+            }
+        } catch (err) {
+            console.warn("Failed to load persisted error state", err);
+        }
+    }
+
+    private async savePersistedState(): Promise<void> {
+        if (!this.context) return;
+        const serializable: Record<string, any> = {};
+        for (const [key, state] of this.errorState.entries()) {
+            serializable[key] = {
+                timestamps: state.timestamps,
+                currentLevel: state.currentLevel,
+                lastSeenMs: state.lastSeenMs
+            };
+        }
+
+        try {
+            await this.context.workspaceState.update("whybug.errorState", serializable);
+        } catch (err) {
+            console.warn("Failed to save persisted error state", err);
+        }
+    }
+
+    /**
+     * Compute the prompt level (0, 1, or 2) for an error type based on its score.
+     */
+    private computeLevel(canonicalErrorType: string): number {
+        const state = this.errorState.get(canonicalErrorType);
+        if (!state) return 0;
+
+        const score = getHybridErrorScore(state.timestamps, {
+            windowMs: this.WINDOW_MS,
+            halfLifeMs: this.HALF_LIFE_MS,
+            nowMs: Date.now()
+        });
+
+        if (score >= this.LEVEL_THRESHOLDS.l2) return 2;
+        if (score >= this.LEVEL_THRESHOLDS.l1) return 1;
+        return 0;
+    }
+
+    /**
+     * Get analytics for all tracked error types.
+     */
+    public getErrorAnalytics(): ErrorAnalytics[] {
+        const results: ErrorAnalytics[] = [];
+
+        for (const [errorType, state] of this.errorState.entries()) {
+            const breakdown = getHybridErrorScore(state.timestamps, {
+                windowMs: this.WINDOW_MS,
+                halfLifeMs: this.HALF_LIFE_MS,
+                nowMs: Date.now()
+            });
+
+            results.push({
+                errorType,
+                recentCount: state.timestamps.filter(
+                    ts => Date.now() - ts <= this.WINDOW_MS
+                ).length,
+                totalScore: breakdown,
+                currentLevel: state.currentLevel,
+                lastSeenMs: state.lastSeenMs
+            });
+        }
+
+        // Sort by most recent first
+        return results.sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+    }
+
+    /**
+     * For testing/debugging: manually record an error occurrence.
+     */
+    public recordErrorForTesting(errorType: string): void {
+        console.log(`[DebugAssistantService] MANUAL TEST: Recording error ${errorType}`);
+        this.updateErrorState(errorType);
+        const analytics = this.getErrorAnalytics();
+        console.log(`[DebugAssistantService] Updated error state. Current analytics:`, analytics);
+    }
+
+    /**
      * Explain multiple error types (from console output).
      * One bullet per error type, generic explanation only.
      */
@@ -137,9 +299,11 @@ Now explain the errors:`;
 
     extractErrorEntriesFromTerminalOutput(terminalOutput: string): Array<{ errorType: string; message: string }> {
         if (!terminalOutput || terminalOutput.trim().length === 0) {
+            console.log("[DebugAssistantService] No terminal output to parse");
             return [];
         }
 
+        console.log("[DebugAssistantService] Parsing terminal output for errors...");
         const lines = terminalOutput.split(/\r?\n/);
         const errorPattern = /([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning))\s*:\s*(.*)$/;
         const entries: Array<{ errorType: string; message: string }> = [];
@@ -150,8 +314,12 @@ Now explain the errors:`;
 
             const errorType = match[1];
             const message = match[2].trim();
+            console.log(`[DebugAssistantService] Found error: ${errorType}`);
             entries.push({ errorType, message });
+            this.updateErrorState(errorType);
         }
+
+        console.log(`[DebugAssistantService] Extracted ${entries.length} error entries`);
 
         const deduped = new Map<string, { errorType: string; message: string }>();
         for (const entry of entries) {
@@ -210,6 +378,7 @@ Now explain the errors:`;
      */
     async explainError(error: string): Promise<string> {
         const errorType = this.extractErrorType(error);
+        this.updateErrorState(errorType);
         
         const prompt = `Explain what a **${errorType}** is in one sentence. Do NOT provide code examples. Do NOT be specific to the error message. Just explain the error type itself.
 
