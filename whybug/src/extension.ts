@@ -11,9 +11,9 @@ export function activate(context: vscode.ExtensionContext) {
     console.log("🔥 WhyBug ACTIVATED");
 
     const assistant = new DebugAssistantService(context);
-    const sidebar = new SidebarProvider(context, assistant);
-    const tracker = new ErrorTracker(context);
     const terminalCapture = new TerminalOutputCapture();
+    const sidebar = new SidebarProvider(context, assistant, terminalCapture);
+    const tracker = new ErrorTracker(context);
     terminalCapture.start();
     const executionOutput = new WeakMap<any, string>();
 
@@ -37,6 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
     let terminalStartListener: any = { dispose: () => {} };
     if ((vscode.window as any).onDidStartTerminalShellExecution) {
         terminalStartListener = (vscode.window as any).onDidStartTerminalShellExecution((event: any) => {
+            sidebar.hideHintPrompt();
             executionOutput.set(event.execution, "");
 
             (async () => {
@@ -63,6 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 const response = await assistant.explainError(errorMessage);
                 sidebar.streamResponse(response);
+                sidebar.showHintPrompt();
             } catch (err) {
                 sidebar.update("⚠️ AI error during live debug session.");
             }
@@ -98,8 +100,11 @@ export function activate(context: vscode.ExtensionContext) {
                 try {
                     const errorEntries = assistant.extractErrorEntriesFromTerminalOutput(terminalOutput);
                     console.log("🐛 Extracted runtime error entries:", errorEntries);
+                    // Store for later access by Hint button (before clearing terminal buffer)
+                    assistant.setRecentErrorEntries(errorEntries);
                     const response = assistant.explainErrorEntriesDeterministic(errorEntries);
                     sidebar.streamResponse(response);
+                    sidebar.showHintPrompt();
                     if (terminal) {
                         terminalCapture.clearTerminal(terminal);
                     } else {
