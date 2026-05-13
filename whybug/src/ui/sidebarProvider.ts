@@ -1,12 +1,13 @@
 import * as vscode from "vscode";
 import { DebugAssistantService } from "../services/debugAssistantService";
+import { TerminalOutputCapture } from "../services/terminalOutputCapture";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "whybug.sidebar";
     private _view?: vscode.WebviewView;
     private isStreaming = false;
 
-    constructor(private readonly context: vscode.ExtensionContext, private assistant: DebugAssistantService) { }
+    constructor(private readonly context: vscode.ExtensionContext, private assistant: DebugAssistantService, private terminalCapture?: TerminalOutputCapture) { }
 
     public resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
@@ -19,41 +20,73 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
-            const code = editor.document.getText();
+            if (data.command === 'hideHintPrompt') {
+                this.hideHintPrompt();
+                return;
+            }
 
             if (data.command === 'requestMoreHelp') {
-                this.postMessage("", true);
+                this.beginThinking();
                 try {
                     let response = "";
-                    if (data.action === 'hint') response = await this.assistant.askCustom("Give me a tiny hint. Do NOT solve it.", code);
-                    else if (data.action === 'term') response = await this.assistant.askCustom("Explain the technical terms simply.", code);
-                    else if (data.action === 'analytics') {
+
+                    if (data.action === 'analytics') {
                         const analytics = this.assistant.getErrorAnalytics();
                         response = this.formatAnalytics(analytics);
+                        this.streamResponse(response);
+                        return;
                     }
 
-                    this.streamResponse(response);
-                } catch (err) {
-                    this.update("⚠️ AI error. Is Ollama running?");
+                    // Gather terminal output (preferred) and editor code (optional)
+                    const terminalOutput = this.terminalCapture ? this.terminalCapture.getLastOutput() : "";
+                    const editor = vscode.window.activeTextEditor;
+                    const code = editor ? editor.document.getText() : "";
+
+                    // If the user requested a hint, call the model-driven hint with terminal + code context
+                    if (data.action === 'hint') {
+                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 15000);
+                        this.streamResponse(response);
+                        return;
+                    }
+
+                    // Terms: explain error types found in terminal output. Prefer quick deterministic fallback if model times out.
+                    if (data.action === 'term') {
+                        // Terms should look at code only per user request
+                        const snippet = code ? code.slice(0, 4000) : "";
+
+                        // Deterministic immediate terms
+                        const deterministic = this.assistant.deterministicTermsFromCode(snippet);
+                        this.streamResponse(deterministic);
+
+                        return;
+                    }
+
+                } catch (err: any) {
+                    const msg = err?.message ?? String(err);
+                    this.update(`⚠️ AI error: ${msg}`);
                 }
             }
         });
     }
 
     public async streamResponse(fullText: string) {
-        this.isStreaming = true;
-        this.postMessage("", true);
-        let currentText = "";
-        for (const char of fullText.split("")) {
-            if (!this.isStreaming) break;
-            currentText += char;
-            this.postMessage(currentText, false);
-            await new Promise(resolve => setTimeout(resolve, 10));
-        }
+        // One-shot render to avoid slow char-by-char UX when backend is slow.
         this.isStreaming = false;
+        this.postMessage(fullText, false);
         this._view?.webview.postMessage({ type: "finished" });
+    }
+
+    public showHintPrompt() {
+        this._view?.webview.postMessage({ type: "hint-ready" });
+    }
+
+    public hideHintPrompt() {
+        this._view?.webview.postMessage({ type: "hint-hidden" });
+    }
+
+    public beginThinking() {
+        // show thinking state in the webview (clear + spinner)
+        this.postMessage("", true);
     }
 
     public update(text: string) { this.postMessage(text, false); }
@@ -272,10 +305,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <div style="flex-shrink: 0;">
                     <h3>Tutor Actions</h3>
                     <div class="button-group">
-                        <button class="tutor-btn" onclick="requestAction('hint')">
-                            <span class="emoji">💡</span>
-                            <span class="label">Hint</span>
-                        </button>
                         <button class="tutor-btn" onclick="requestAction('term')">
                             <span class="emoji">📖</span>
                             <span class="label">Terms</span>
@@ -295,10 +324,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <div id="content">Run your code to see errors...</div>
                 </div>
 
+                <div id="hintPanel" style="display:none; flex-shrink:0; border:1px solid var(--vscode-panel-border); border-radius:8px; padding:10px; background:var(--vscode-editor-background);">
+                    <div style="font-size:12px; color:var(--vscode-descriptionForeground); margin-bottom:8px;">Do you need a hint?</div>
+                    <button id="hintBtn" class="tutor-btn" style="width:100%; flex-direction:row; justify-content:center; gap:8px; padding:10px 12px;" onclick="requestAction('hint')">
+                        <span class="emoji">💡</span>
+                        <span class="label">Show Hint</span>
+                    </button>
+                </div>
+
                 <script>
                     const vscode = acquireVsCodeApi();
                     const content = document.getElementById("content");
                     const stopBtn = document.getElementById("stopBtn");
+                    const hintPanel = document.getElementById("hintPanel");
                     let userIsScrolling = false;
 
                     content.addEventListener('wheel', () => {
@@ -307,6 +345,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
 
                     function requestAction(type) {
+                        if (type !== 'hint') {
+                            vscode.postMessage({ command: 'hideHintPrompt' });
+                        }
                         vscode.postMessage({ command: 'requestMoreHelp', action: type });
                     }
 
@@ -370,6 +411,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             }
                         } else if (message.type === "finished") {
                             stopBtn.style.display = "none";
+                        } else if (message.type === "hint-ready") {
+                            hintPanel.style.display = "block";
+                        } else if (message.type === "hint-hidden") {
+                            hintPanel.style.display = "none";
                         }
                     });
                 </script>
