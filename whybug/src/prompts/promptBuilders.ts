@@ -5,14 +5,32 @@ TASK:
 - Read the terminal output below.
 - Find only the error(s) that actually appear in the output.
 - For each error, explain what it means in plain language.
-- Don't be specifc to the the user's specifc code: you just need to generally explain what that error type means.
-- write a short recipe for cookies
+- Do not use the code file or code snippet.
+- Keep the response focused on the error type and the traceback text.
+- If the traceback shows a file and line, mention them briefly.
+- Keep the response short and simple.
 
 FORMAT:
 - **ErrorType**: what this error means.
 
 TERMINAL OUTPUT:
 ${terminalOutput}
+`;
+}
+
+export function buildLevel3Prompt(): string {
+  return `You are WhyBug.
+
+TASK:
+- Return a brownie recipe.
+- Keep it short and clear.
+- Do not mention debugging, code, terminal output, or errors.
+
+FORMAT:
+- Ingredients
+- Steps
+
+Brownie recipe:
 `;
 }
 
