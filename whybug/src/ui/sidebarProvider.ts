@@ -28,7 +28,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             if (data.command === 'requestMoreHelp') {
                 whybugInfo('requestMoreHelp received:', data.action);
-                this.beginThinking();
                 try {
                     let response = "";
 
@@ -55,6 +54,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const currentLevel = this.assistant.getDisplayLevelForEntries(recentEntries);
                         const targetLevel = Math.min(currentLevel + 1, 3);
                         whybugInfo('Hint temporary elevation: currentLevel=', currentLevel, 'targetLevel=', targetLevel);
+                        if (currentLevel >= 3 || this.assistant.hasConsumedRecentHintEscalation()) {
+                            this.update('No more hints!');
+                            return;
+                        }
+                        this.assistant.consumeRecentHintEscalation();
+                        this.beginThinking();
                         const response = await this.assistant.hintWithModel(terminalOutput, editor, 25000, targetLevel);
                         this.streamResponse(response);
                         return;
@@ -63,10 +68,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // Terms: explain error types found in terminal output. Prefer quick deterministic fallback if model times out.
                     if (data.action === 'term') {
                         whybugInfo('Terms button clicked. code length:', code.length);
+                        this.beginThinking();
                         const response = await this.assistant.termsWithModel(code, 20000);
                         this.streamResponse(response);
                         return;
                     }
+
+                    this.beginThinking();
 
                 } catch (err: any) {
                     const msg = err?.message ?? String(err);
@@ -332,10 +340,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 </div>
 
                 <div id="hintPanel" style="display:none; flex-shrink:0; border:1px solid var(--vscode-panel-border); border-radius:8px; padding:10px; background:var(--vscode-editor-background);">
-                    <div style="font-size:12px; color:var(--vscode-descriptionForeground); margin-bottom:8px;">Do you need a hint?</div>
+                    <div style="font-size:12px; color:var(--vscode-descriptionForeground); margin-bottom:8px;">Need more help?</div>
                     <button id="hintBtn" class="tutor-btn" style="width:100%; flex-direction:row; justify-content:center; gap:8px; padding:10px 12px;" onclick="requestAction('hint')">
                         <span class="emoji">💡</span>
-                        <span class="label">Show Hint</span>
+                        <span class="label">Need more help?</span>
                     </button>
                 </div>
 
