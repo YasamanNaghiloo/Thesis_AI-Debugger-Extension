@@ -14,6 +14,7 @@ export interface ErrorAnalytics {
     recentCount: number;
     totalScore: number;
     currentLevel: number;
+    displayLevel?: number;
     lastSeenMs: number;
     timestamps: number[];
 }
@@ -251,6 +252,12 @@ export class DebugAssistantService {
         return 0;
     }
 
+    private mapCountToDisplayLevel(count: number): number {
+        if (count <= 10) return 1;
+        if (count <= 20) return 2;
+        return 3;
+    }
+
     /**
      * Get analytics for all tracked error types.
      */
@@ -264,13 +271,13 @@ export class DebugAssistantService {
                 nowMs: Date.now()
             });
 
+            const recentCount = state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length;
             results.push({
                 errorType,
-                recentCount: state.timestamps.filter(
-                    ts => Date.now() - ts <= this.WINDOW_MS
-                ).length,
+                recentCount,
                 totalScore: breakdown,
                 currentLevel: state.currentLevel,
+                displayLevel: this.mapCountToDisplayLevel(recentCount),
                 lastSeenMs: state.lastSeenMs,
                 timestamps: state.timestamps
             });
@@ -334,19 +341,34 @@ Now explain the errors:`;
     /**
      * Explain errors directly from terminal output using the model prompt.
      */
-    public async explainTerminalOutputWithPrompt(terminalOutput: string, timeoutMs = 20000): Promise<string> {
+    public async explainTerminalOutputWithPrompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
         if (!terminalOutput || terminalOutput.trim().length === 0) {
             return "No terminal output captured. Unable to identify errors.";
         }
 
+        // If caller didn't pass parsed entries, try to extract them (caller normally already did this).
+        const parsedEntries = entries && entries.length > 0 ? entries : this.extractErrorEntriesFromTerminalOutput(terminalOutput);
+
         const prompt = buildExplainErrorPrompt(terminalOutput);
 
         try {
-            return await this.askModel(prompt, timeoutMs);
+            const modelResp = await this.askModel(prompt, timeoutMs);
+
+            // Annotate the model response with display level per error detected.
+            const analytics = this.getErrorAnalytics();
+            const byType = new Map<string, number>();
+            for (const a of analytics) byType.set(a.errorType, a.displayLevel ?? a.currentLevel ?? 0);
+
+            // Build a small header showing level per error type.
+            const levelLines = parsedEntries.map(e => {
+                const lvl = byType.get(e.errorType) ?? 1;
+                return `Level ${lvl} — ${e.errorType}`;
+            });
+
+            return [`${levelLines.join('\n')}`, '', modelResp].join('\n');
         } catch (err: any) {
             console.warn("explainTerminalOutputWithPrompt failed, falling back to deterministic:", err?.message ?? err);
-            const entries = this.extractErrorEntriesFromTerminalOutput(terminalOutput);
-            return this.explainErrorEntriesDeterministic(entries);
+            return this.explainErrorEntriesDeterministic(parsedEntries);
         }
     }
 
@@ -721,9 +743,9 @@ Now explain the errors:`;
      * Model-driven hint that uses terminal output + code context.
      * Reads the traceback, finds the error location in code, and asks guiding questions.
      */
-    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
+    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000, targetLevel?: number): Promise<string> {
         try {
-            whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
+            whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor, 'targetLevel:', targetLevel);
             const { snippet, line } = await this.getCodeContextFromTerminalOutput(terminalOutput, activeEditor, 4);
             whybugInfo('hintWithModel code context. snippet length:', snippet?.length ?? 0, 'line:', line);
             if (!snippet || snippet.length === 0) {
@@ -742,6 +764,23 @@ Now explain the errors:`;
             }
             return 'Unable to generate hint. Try running the code again.';
         }
+    }
+
+    /**
+     * Given parsed entries (errorType/message), compute the display level per our mapping.
+     * Returns maximum display level among entries (1..3) or 1 if no entries.
+     */
+    public getDisplayLevelForEntries(entries: Array<{ errorType: string; message: string }>): number {
+        if (!entries || entries.length === 0) return 1;
+        let maxLevel = 1;
+        for (const e of entries) {
+            const canonical = this.getCanonicalErrorType(e.errorType);
+            const state = this.errorState.get(canonical);
+            const recentCount = state ? state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length : 0;
+            const lvl = this.mapCountToDisplayLevel(recentCount);
+            if (lvl > maxLevel) maxLevel = lvl;
+        }
+        return maxLevel;
     }
 
     /**

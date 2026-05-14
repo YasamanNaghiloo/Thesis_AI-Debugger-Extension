@@ -99,9 +99,19 @@ export function activate(context: vscode.ExtensionContext) {
                     // Store for later access by Hint button (before clearing terminal buffer)
                     assistant.setRecentErrorEntries(errorEntries);
                     assistant.setRecentTerminalOutput(terminalOutput);
-                    const response = await assistant.explainTerminalOutputWithPrompt(terminalOutput);
-                    sidebar.streamResponse(response);
-                    sidebar.showHintPrompt();
+                    // Determine whether to auto-elevate to level 2 (hint) based on historic counts
+                    const displayLevel = assistant.getDisplayLevelForEntries(errorEntries);
+                    if (displayLevel >= 2) {
+                        whybugInfo('Auto-elevating run response to Level 2 (hint) because displayLevel=', displayLevel);
+                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000);
+                        sidebar.streamResponse(response);
+                        // Still show the hint prompt so user can ask for more help
+                        sidebar.showHintPrompt();
+                    } else {
+                        const response = await assistant.explainTerminalOutputWithPrompt(terminalOutput, errorEntries);
+                        sidebar.streamResponse(response);
+                        sidebar.showHintPrompt();
+                    }
                     if (terminal) {
                         terminalCapture.clearTerminal(terminal);
                     } else {

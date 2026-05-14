@@ -50,7 +50,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // If the user requested a hint, call the model-driven hint with terminal + code context
                     if (data.action === 'hint') {
                         whybugInfo('Hint button clicked. terminalOutput length:', terminalOutput.length, 'code length:', code.length);
-                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 25000);
+                        // Compute temporary elevation: raise display level by 1 for this instance only
+                        const recentEntries = this.assistant.getRecentErrorEntries();
+                        const currentLevel = this.assistant.getDisplayLevelForEntries(recentEntries);
+                        const targetLevel = Math.min(currentLevel + 1, 3);
+                        whybugInfo('Hint temporary elevation: currentLevel=', currentLevel, 'targetLevel=', targetLevel);
+                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 25000, targetLevel);
                         this.streamResponse(response);
                         return;
                     }
@@ -115,7 +120,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <div class="accordion-header" onclick="toggleAccordion(${idx})">
                     <span class="accordion-chevron" id="chevron-${idx}">▶</span>
                     <span class="accordion-title"><strong>${a.errorType}</strong></span>
-                    <span class="accordion-score">Score: ${a.totalScore.toFixed(2)}</span>
+                    <span class="accordion-score">Score: ${a.totalScore.toFixed(2)} — Level: ${a.displayLevel ?? a.currentLevel}</span>
                 </div>
                 <div class="accordion-content" id="content-${idx}" style="display: none;">
                     ${timestampLines}
