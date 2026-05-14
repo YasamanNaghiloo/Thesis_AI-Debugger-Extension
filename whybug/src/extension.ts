@@ -83,7 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
             whybugInfo("Terminal execution ended. Exit code:", event.exitCode);
             
             if (event.exitCode !== 0) {
-                sidebar.update(`📟 Program failed. Analyzing errors...`);
+                sidebar.beginThinking();
                 
                 const terminal = event.terminal || event.execution?.terminal || vscode.window.activeTerminal;
                 await new Promise((resolve) => setTimeout(resolve, 75));
@@ -99,17 +99,21 @@ export function activate(context: vscode.ExtensionContext) {
                     // Store for later access by Hint button (before clearing terminal buffer)
                     assistant.setRecentErrorEntries(errorEntries);
                     assistant.setRecentTerminalOutput(terminalOutput);
-                    // Determine whether to auto-elevate to level 2 (hint) based on historic counts
+                    // Determine which level prompt to use based on historic counts.
                     const displayLevel = assistant.getDisplayLevelForEntries(errorEntries);
-                    if (displayLevel >= 2) {
-                        whybugInfo('Auto-elevating run response to Level 2 (hint) because displayLevel=', displayLevel);
-                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000);
-                        sidebar.streamResponse(response);
-                        // Still show the hint prompt so user can ask for more help
-                        sidebar.showHintPrompt();
-                    } else {
+                    whybugInfo('Run display level selected:', displayLevel);
+
+                    if (displayLevel === 1) {
                         const response = await assistant.explainTerminalOutputWithPrompt(terminalOutput, errorEntries);
                         sidebar.streamResponse(response);
+                        sidebar.showHintPrompt();
+                    } else if (displayLevel === 2) {
+                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000, 2);
+                        sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
+                        sidebar.showHintPrompt();
+                    } else {
+                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000, 3);
+                        sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
                         sidebar.showHintPrompt();
                     }
                     if (terminal) {

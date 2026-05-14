@@ -3,6 +3,7 @@ import { OllamaProvider } from "../providers/OllamaProvider";
 import { 
     buildExplainErrorPrompt, 
     buildHintPrompt,
+    buildLevel3Prompt,
     buildTermsPrompt,
     buildReflectionPrompt 
 } from "../prompts/promptBuilders";
@@ -37,6 +38,7 @@ export class DebugAssistantService {
     private recentErrorEntries: Array<{ errorType: string; message: string }> = [];
     private recentErrorEntriesTimestamp: number = 0;
     private readonly RECENT_ENTRIES_WINDOW_MS = 60000; // 60 seconds
+    private recentHintEscalationUsed: boolean = false;
 
     // Store most recent terminal output so Hint can still use traceback after terminal buffer is cleared.
     private recentTerminalOutput: string = "";
@@ -713,6 +715,7 @@ Now explain the errors:`;
     public setRecentErrorEntries(entries: Array<{ errorType: string; message: string }>) {
         this.recentErrorEntries = entries;
         this.recentErrorEntriesTimestamp = Date.now();
+        this.recentHintEscalationUsed = false;
     }
 
     // Get recent error entries if still within the 60s window
@@ -722,6 +725,20 @@ Now explain the errors:`;
             return [];
         }
         return this.recentErrorEntries;
+    }
+
+    /**
+     * Return true if the one-shot extra-help escalation was already used for the current error batch.
+     */
+    public hasConsumedRecentHintEscalation(): boolean {
+        return this.recentHintEscalationUsed;
+    }
+
+    /**
+     * Mark the one-shot extra-help escalation as consumed for the current error batch.
+     */
+    public consumeRecentHintEscalation(): void {
+        this.recentHintEscalationUsed = true;
     }
 
     // Store recent terminal output (persisted for 60s) for hint requests after run completion.
@@ -746,6 +763,13 @@ Now explain the errors:`;
     public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000, targetLevel?: number): Promise<string> {
         try {
             whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor, 'targetLevel:', targetLevel);
+            const effectiveLevel = targetLevel ?? 2;
+
+            if (effectiveLevel >= 3) {
+                whybugInfo('hintWithModel using Level 3 prompt (brownies).');
+                return await this.askModel(buildLevel3Prompt(), timeoutMs);
+            }
+
             const { snippet, line } = await this.getCodeContextFromTerminalOutput(terminalOutput, activeEditor, 4);
             whybugInfo('hintWithModel code context. snippet length:', snippet?.length ?? 0, 'line:', line);
             if (!snippet || snippet.length === 0) {
@@ -758,6 +782,25 @@ Now explain the errors:`;
             return await this.askModel(prompt, timeoutMs);
         } catch (err: any) {
             console.warn('hintWithModel failed, falling back to deterministic:', err?.message ?? err);
+            const effectiveLevel = targetLevel ?? 2;
+            if (effectiveLevel >= 3) {
+                return [
+                    "Ingredients:",
+                    "- 1/2 cup butter",
+                    "- 1 cup sugar",
+                    "- 2 eggs",
+                    "- 1 tsp vanilla",
+                    "- 1/3 cup cocoa powder",
+                    "- 1/2 cup flour",
+                    "- 1/4 tsp salt",
+                    "",
+                    "Steps:",
+                    "1. Preheat oven to 350°F (175°C).",
+                    "2. Melt the butter, then mix in sugar, eggs, and vanilla.",
+                    "3. Stir in cocoa powder, flour, and salt.",
+                    "4. Pour into a greased pan and bake for 20-25 minutes."
+                ].join('\n');
+            }
             const entries = this.getRecentErrorEntries();
             if (entries.length > 0) {
                 return this.deterministicHintsFromEntriesWithContext(entries);
@@ -774,13 +817,28 @@ Now explain the errors:`;
         if (!entries || entries.length === 0) return 1;
         let maxLevel = 1;
         for (const e of entries) {
-            const canonical = this.getCanonicalErrorType(e.errorType);
-            const state = this.errorState.get(canonical);
-            const recentCount = state ? state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length : 0;
-            const lvl = this.mapCountToDisplayLevel(recentCount);
+            const lvl = this.getDisplayLevelForErrorType(e.errorType);
             if (lvl > maxLevel) maxLevel = lvl;
         }
         return maxLevel;
+    }
+
+    /**
+     * Return the current display level for a specific error type.
+     */
+    public getDisplayLevelForErrorType(errorType: string): number {
+        const canonical = this.getCanonicalErrorType(errorType);
+        const state = this.errorState.get(canonical);
+        const recentCount = state ? state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length : 0;
+        return this.mapCountToDisplayLevel(recentCount);
+    }
+
+    /**
+     * Format the detected errors with their current display levels for the run output.
+     */
+    public formatDisplayLevelHeaders(entries: Array<{ errorType: string; message: string }>): string {
+        if (!entries || entries.length === 0) return "";
+        return entries.map(entry => `Level ${this.getDisplayLevelForErrorType(entry.errorType)} — ${entry.errorType}`).join("\n");
     }
 
     /**
