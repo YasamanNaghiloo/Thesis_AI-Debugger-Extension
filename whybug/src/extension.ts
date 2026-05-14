@@ -6,9 +6,10 @@ import { SidebarProvider } from "./ui/sidebarProvider";
 import { ErrorTracker } from "./services/errorTracker";
 import { DebugAssistantService } from "./services/debugAssistantService";
 import { TerminalOutputCapture } from "./services/terminalOutputCapture";
+import { whybugError, whybugInfo } from "./services/logger";
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log("🔥 WhyBug ACTIVATED");
+    whybugInfo("WhyBug ACTIVATED");
 
     const assistant = new DebugAssistantService(context);
     const terminalCapture = new TerminalOutputCapture();
@@ -24,7 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
             .replace(/\x1B[@-_][0-?]*[ -\/]*[@-~]/g, "");
     };
 
-    console.log("✅ Services initialized");
+    whybugInfo("Services initialized");
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar)
@@ -77,10 +78,9 @@ export function activate(context: vscode.ExtensionContext) {
     let terminalListener: any;
     
     if ((vscode.window as any).onDidEndTerminalShellExecution) {
-        console.log("✅ Terminal listener API available");
+        whybugInfo("Terminal listener API available");
         terminalListener = (vscode.window as any).onDidEndTerminalShellExecution(async (event: any) => {
-            console.log("🔥 Terminal execution ended. Exit code:", event.exitCode);
-            console.log("🔥 Event details:", JSON.stringify(event, null, 2));
+            whybugInfo("Terminal execution ended. Exit code:", event.exitCode);
             
             if (event.exitCode !== 0) {
                 sidebar.update(`📟 Program failed. Analyzing errors...`);
@@ -91,18 +91,15 @@ export function activate(context: vscode.ExtensionContext) {
                 const outputFromTerminal = terminal ? terminalCapture.getOutputForTerminal(terminal) : terminalCapture.getLastOutput();
                 const terminalOutput = outputFromExecution || outputFromTerminal;
                 
-                console.log("=== TERMINAL OUTPUT CAPTURE START ===");
-                console.log("Total output length:", terminalOutput.length);
-                console.log("Output content:");
-                console.log(terminalOutput);
-                console.log("=== TERMINAL OUTPUT CAPTURE END ===");
+                whybugInfo("Terminal output captured. length:", terminalOutput.length);
                 
                 try {
                     const errorEntries = assistant.extractErrorEntriesFromTerminalOutput(terminalOutput);
-                    console.log("🐛 Extracted runtime error entries:", errorEntries);
+                    whybugInfo("Extracted runtime error entries:", errorEntries);
                     // Store for later access by Hint button (before clearing terminal buffer)
                     assistant.setRecentErrorEntries(errorEntries);
-                    const response = assistant.explainErrorEntriesDeterministic(errorEntries);
+                    assistant.setRecentTerminalOutput(terminalOutput);
+                    const response = await assistant.explainTerminalOutputWithPrompt(terminalOutput);
                     sidebar.streamResponse(response);
                     sidebar.showHintPrompt();
                     if (terminal) {
@@ -111,13 +108,13 @@ export function activate(context: vscode.ExtensionContext) {
                         terminalCapture.clearBuffer();
                     }
                 } catch (err) {
-                    console.error("❌ WhyBug AI Error:", err);
+                    whybugError("WhyBug AI Error:", err);
                     sidebar.update("⚠️ AI error. Is Ollama running?");
                 }
             }
         });
     } else {
-        console.log("⚠️ Terminal listener API NOT available");
+        whybugInfo("Terminal listener API NOT available");
         terminalListener = { dispose: () => {} };
     }
 

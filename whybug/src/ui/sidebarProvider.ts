@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { DebugAssistantService } from "../services/debugAssistantService";
 import { TerminalOutputCapture } from "../services/terminalOutputCapture";
+import { whybugInfo } from "../services/logger";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "whybug.sidebar";
@@ -26,6 +27,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
 
             if (data.command === 'requestMoreHelp') {
+                whybugInfo('requestMoreHelp received:', data.action);
                 this.beginThinking();
                 try {
                     let response = "";
@@ -38,26 +40,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Gather terminal output (preferred) and editor code (optional)
-                    const terminalOutput = this.terminalCapture ? this.terminalCapture.getLastOutput() : "";
+                    const liveTerminalOutput = this.terminalCapture ? this.terminalCapture.getLastOutput() : "";
+                    const terminalOutput = liveTerminalOutput && liveTerminalOutput.trim().length > 0
+                        ? liveTerminalOutput
+                        : this.assistant.getRecentTerminalOutput();
                     const editor = vscode.window.activeTextEditor;
                     const code = editor ? editor.document.getText() : "";
 
                     // If the user requested a hint, call the model-driven hint with terminal + code context
                     if (data.action === 'hint') {
-                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 15000);
+                        whybugInfo('Hint button clicked. terminalOutput length:', terminalOutput.length, 'code length:', code.length);
+                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 25000);
                         this.streamResponse(response);
                         return;
                     }
 
                     // Terms: explain error types found in terminal output. Prefer quick deterministic fallback if model times out.
                     if (data.action === 'term') {
-                        // Terms should look at code only per user request
-                        const snippet = code ? code.slice(0, 4000) : "";
-
-                        // Deterministic immediate terms
-                        const deterministic = this.assistant.deterministicTermsFromCode(snippet);
-                        this.streamResponse(deterministic);
-
+                        whybugInfo('Terms button clicked. code length:', code.length);
+                        const response = await this.assistant.termsWithModel(code, 20000);
+                        this.streamResponse(response);
                         return;
                     }
 

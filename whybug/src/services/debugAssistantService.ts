@@ -2,9 +2,12 @@ import * as vscode from "vscode";
 import { OllamaProvider } from "../providers/OllamaProvider";
 import { 
     buildExplainErrorPrompt, 
+    buildHintPrompt,
+    buildTermsPrompt,
     buildReflectionPrompt 
 } from "../prompts/promptBuilders";
 import { getHybridErrorScore } from "./errorAdaptation";
+import { whybugInfo, whybugWarn } from "./logger";
 
 export interface ErrorAnalytics {
     errorType: string;
@@ -33,6 +36,11 @@ export class DebugAssistantService {
     private recentErrorEntries: Array<{ errorType: string; message: string }> = [];
     private recentErrorEntriesTimestamp: number = 0;
     private readonly RECENT_ENTRIES_WINDOW_MS = 60000; // 60 seconds
+
+    // Store most recent terminal output so Hint can still use traceback after terminal buffer is cleared.
+    private recentTerminalOutput: string = "";
+    private recentTerminalOutputTimestamp: number = 0;
+    private readonly RECENT_TERMINAL_WINDOW_MS = 60000; // 60 seconds
 
     // Adaptive prompt configuration (in milliseconds)
     private readonly WINDOW_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days
@@ -324,6 +332,25 @@ Now explain the errors:`;
     }
 
     /**
+     * Explain errors directly from terminal output using the model prompt.
+     */
+    public async explainTerminalOutputWithPrompt(terminalOutput: string, timeoutMs = 20000): Promise<string> {
+        if (!terminalOutput || terminalOutput.trim().length === 0) {
+            return "No terminal output captured. Unable to identify errors.";
+        }
+
+        const prompt = buildExplainErrorPrompt(terminalOutput);
+
+        try {
+            return await this.askModel(prompt, timeoutMs);
+        } catch (err: any) {
+            console.warn("explainTerminalOutputWithPrompt failed, falling back to deterministic:", err?.message ?? err);
+            const entries = this.extractErrorEntriesFromTerminalOutput(terminalOutput);
+            return this.explainErrorEntriesDeterministic(entries);
+        }
+    }
+
+    /**
      * Deterministic, fast hints produced locally when the model is unavailable or times out.
      */
     public deterministicHintsFromEntries(entries: Array<{ errorType: string; message: string }>): string {
@@ -504,14 +531,31 @@ Now explain the errors:`;
 
     // Wrapper that attempts a timeout-capable model call when available
     private async askModel(prompt: string, timeoutMs = 20000): Promise<string> {
-        if (typeof (this.provider as any).askWithTimeout === 'function') {
-            return await (this.provider as any).askWithTimeout(prompt, timeoutMs);
+        whybugInfo('askModel called. prompt length:', prompt?.length ?? 0, 'timeoutMs:', timeoutMs);
+        const preview = typeof prompt === 'string' && prompt.length > 1500 ? prompt.slice(0, 1500) + '\n...<truncated>...' : prompt;
+        whybugInfo('Prompt preview:\n', preview);
+
+        try {
+            if (typeof (this.provider as any).askWithTimeout === 'function') {
+                const res = await (this.provider as any).askWithTimeout(prompt, timeoutMs);
+                const rpreview = typeof res === 'string' && res.length > 1500 ? res.slice(0, 1500) + '\n...<truncated>...' : res;
+                whybugInfo('Model response length:', res?.length ?? 0);
+                whybugInfo('Model response preview:\n', rpreview);
+                return res;
+            }
+
+            // Fallback: race the ask() against a timeout
+            const res = await Promise.race([
+                this.provider.ask(prompt),
+                new Promise<string>((_, rej) => setTimeout(() => rej(new Error('Model request timed out')), timeoutMs))
+            ]) as string;
+
+            whybugInfo('Fallback model response length:', res?.length ?? 0);
+            return res;
+        } catch (err: any) {
+            whybugWarn('askModel error:', err?.message ?? err);
+            throw err;
         }
-        // Fallback: race the ask() against a timeout
-        return await Promise.race([
-            this.provider.ask(prompt),
-            new Promise<string>((_, rej) => setTimeout(() => rej(new Error('Model request timed out')), timeoutMs))
-        ]) as string;
     }
 
     // Deterministic term extraction from code using known keywords
@@ -658,40 +702,36 @@ Now explain the errors:`;
         return this.recentErrorEntries;
     }
 
+    // Store recent terminal output (persisted for 60s) for hint requests after run completion.
+    public setRecentTerminalOutput(output: string): void {
+        this.recentTerminalOutput = output || "";
+        this.recentTerminalOutputTimestamp = Date.now();
+    }
+
+    // Return recent terminal output if it is still fresh.
+    public getRecentTerminalOutput(): string {
+        const now = Date.now();
+        if (now - this.recentTerminalOutputTimestamp > this.RECENT_TERMINAL_WINDOW_MS) {
+            return "";
+        }
+        return this.recentTerminalOutput;
+    }
+
     /**
      * Model-driven hint that uses terminal output + code context.
      * Reads the traceback, finds the error location in code, and asks guiding questions.
      */
-    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 15000): Promise<string> {
+    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
         try {
+            whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
             const { snippet, line } = await this.getCodeContextFromTerminalOutput(terminalOutput, activeEditor, 4);
+            whybugInfo('hintWithModel code context. snippet length:', snippet?.length ?? 0, 'line:', line);
             if (!snippet || snippet.length === 0) {
                 return 'No code context available. Try running the code again in the terminal.';
             }
 
-            const prompt = `You are WhyBug, a friendly debugging tutor.
-
-CRITICAL RULES:
-- ONLY reference EXACT variable/function/value names from the CODE SNIPPET
-- NEVER ask generic questions — ask specific ones using real names from the line
-- BAD: "what types do the variables hold?" 
-- GOOD: "I see 'item_price + total_cost' on line X — one looks like a number, one like text. Which is which?"
-- Include one concrete, immediate action per question (e.g., "print(type(item_price))" or "check if key in dict")
-- NO full code fixes, NO invented errors, NO generic advice
-- Max 6 lines, ultra-concise
-
-TASK:
-1) From TERMINAL OUTPUT: find ERROR TYPE and exact LINE NUMBER
-2) From CODE SNIPPET: locate that line and extract all variable/function/value names on it
-3) Write 2-3 SPECIFIC observations or questions using those exact real names
-4) Each question should point to a concrete cause (type mismatch, undefined name, wrong index, missing key, etc)
-5) Add minimal concrete action per question that can run immediately
-
-TERMINAL OUTPUT:
-${terminalOutput}
-
-CODE SNIPPET (error around line ${line || '?'}):
-${snippet}`;
+            const prompt = buildHintPrompt(terminalOutput, snippet, line);
+            whybugInfo('hintWithModel prompt ready. length:', prompt.length);
 
             return await this.askModel(prompt, timeoutMs);
         } catch (err: any) {
@@ -771,6 +811,25 @@ ${snippet}`;
         }
 
         return { snippet: "" };
+    }
+
+    /**
+     * Explain important terms from the current file using the model prompt.
+     */
+    public async termsWithModel(code: string, timeoutMs = 20000): Promise<string> {
+        if (!code || code.trim().length === 0) {
+            return "No code provided to extract terms.";
+        }
+
+        const prompt = buildTermsPrompt(code);
+        whybugInfo('termsWithModel prompt ready. code length:', code.length, 'prompt length:', prompt.length);
+
+        try {
+            return await this.askModel(prompt, timeoutMs);
+        } catch (err: any) {
+            console.warn('termsWithModel failed, falling back to deterministic:', err?.message ?? err);
+            return this.deterministicTermsFromCode(code);
+        }
     }
 
     extractErrorEntriesFromTerminalOutput(terminalOutput: string): Array<{ errorType: string; message: string }> {
@@ -869,36 +928,7 @@ Format:
      * Let the AI parse the terminal output and extract/explain errors.
      */
     async explainTerminalOutput(terminalOutput: string): Promise<string> {
-        if (!terminalOutput || terminalOutput.trim().length === 0) {
-            return "• **Error**: No terminal output captured. Unable to identify errors.";
-        }
-
-        const prompt = `CRITICAL: You MUST only explain errors that ACTUALLY appear in the terminal output below. Do NOT invent or suggest errors.
-
-TERMINAL OUTPUT:
----
-${terminalOutput}
----
-
-INSTRUCTIONS:
-1. Search the terminal output VERY CAREFULLY for lines that contain BOTH a word ending in "Error" or "Exception" AND a colon (:)
-2. Examples of what you're looking for: "TypeError:", "ValueError:", "NameError:", "SyntaxError:"
-3. For EACH unique error type you find IN THE OUTPUT, write ONE bullet point
-4. Each bullet should: **ErrorType**: One sentence generic explanation
-5. If you find NO errors in the output, say: "No errors found in terminal output"
-6. DO NOT list errors that don't appear in the output
-7. DO NOT make suggestions or list potential errors
-
-WHAT TO DO:
-- Read the output line by line
-- Find lines with "Error:" or "Exception:"
-- Extract the error type (the word before the colon)
-- Explain only that error type
-- Output ONLY the errors that are actually present
-
-START YOUR RESPONSE WITH THE ERROR TYPES YOU FOUND:`;
-
-        return this.provider.ask(prompt);
+        return this.explainTerminalOutputWithPrompt(terminalOutput);
     }
 
     async echoTerminalOutput(terminalOutput: string): Promise<string> {
