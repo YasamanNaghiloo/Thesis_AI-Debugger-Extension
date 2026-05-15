@@ -16,6 +16,7 @@ export class OllamaProvider implements AIProvider {
       const preview = typeof prompt === 'string' && prompt.length > 1200 ? prompt.slice(0, 1200) + '\n...<truncated>...' : prompt;
       whybugInfo('Ollama prompt preview:\n', preview);
 
+      const startTime = Date.now();
       const response = await fetch("http://localhost:11434/api/generate", {
         method: "POST",
         headers: {
@@ -24,6 +25,9 @@ export class OllamaProvider implements AIProvider {
         body: JSON.stringify({ model: "gemma3", prompt, stream: false }),
         signal: controller.signal
       });
+
+      const elapsed = Date.now() - startTime;
+      whybugInfo(`Ollama fetch completed in ${elapsed}ms`);
 
       if (!response.ok) {
         throw new Error("Could not connect to Ollama.");
@@ -36,8 +40,8 @@ export class OllamaProvider implements AIProvider {
       return data.response ?? "No response from model.";
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        whybugWarn('Ollama request timed out.');
-        throw new Error('Ollama request timed out.');
+        whybugWarn(`Ollama request timed out after ${timeoutMs}ms.`);
+        throw new Error(`Ollama request timed out after ${timeoutMs}ms. Try running your code again or check if Ollama is responsive.`);
       }
       whybugWarn('Ollama askWithTimeout error:', err?.message ?? err);
       throw err;
