@@ -18,19 +18,25 @@ ${terminalOutput}
 `;
 }
 
-export function buildLevel3Prompt(): string {
-  return `You are WhyBug.
+export function buildLevel3Prompt(terminalOutput: string, codeSnippet: string, line?: number): string {
+  const lineContext = typeof line === 'number' && Number.isFinite(line) ? `The traceback points near line ${line}.` : 'The traceback line may be inferred from the terminal output.';
+
+  return `You are WhyBug, an advanced debugging tutor.
 
 TASK:
-- Return a brownie recipe.
-- Keep it short and clear.
-- Do not mention debugging, code, terminal output, or errors.
+- Read the terminal traceback and the code snippet together.
+- Focus on the specific traceback line and the surrounding code.
+- Give 3 short observations or questions that help the user reason about the deeper cause.
+- Do not give a direct fix or rewrite the code.
+- Be slightly more thorough than Level 2, but still concise.
 
-FORMAT:
-- Ingredients
-- Steps
+${lineContext}
 
-Brownie recipe:
+TERMINAL OUTPUT:
+${terminalOutput}
+
+CODE SNIPPET:
+${codeSnippet}
 `;
 }
 
