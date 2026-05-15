@@ -177,7 +177,7 @@ export class DebugAssistantService {
      * Update error state when an error is encountered.
      * Records a timestamp for this error type and recomputes its level.
      */
-    private updateErrorState(errorType: string, nowMs: number = Date.now()): void {
+    public updateErrorState(errorType: string, nowMs: number = Date.now()): void {
         const canonical = this.getCanonicalErrorType(errorType);
         let state = this.errorState.get(canonical);
         if (!state) {
@@ -290,6 +290,17 @@ export class DebugAssistantService {
     }
 
     /**
+     * Update error state for multiple error entries extracted from terminal output.
+     * Call this before computing display levels to ensure state is fresh.
+     */
+    public updateErrorStateForEntries(entries: Array<{ errorType: string; message: string }>): void {
+        const nowMs = Date.now();
+        for (const entry of entries) {
+            this.updateErrorState(entry.errorType, nowMs);
+        }
+    }
+
+    /**
      * For testing/debugging: manually record an error occurrence.
      */
     public recordErrorForTesting(errorType: string): void {
@@ -348,10 +359,12 @@ Now explain the errors:`;
             return "No terminal output captured. Unable to identify errors.";
         }
 
-        // If caller didn't pass parsed entries, try to extract them (caller normally already did this).
-        const parsedEntries = entries && entries.length > 0 ? entries : this.extractErrorEntriesFromTerminalOutput(terminalOutput);
+        const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
 
-        const prompt = buildExplainErrorPrompt(terminalOutput);
+        // If caller didn't pass parsed entries, try to extract them (caller normally already did this).
+        const parsedEntries = entries && entries.length > 0 ? entries : this.extractErrorEntriesFromTerminalOutput(focusedTerminalOutput || terminalOutput);
+
+        const prompt = buildExplainErrorPrompt(focusedTerminalOutput || terminalOutput);
 
         try {
             const modelResp = await this.askModel(prompt, timeoutMs);
@@ -756,6 +769,21 @@ Now explain the errors:`;
         return this.recentTerminalOutput;
     }
 
+    private getFocusedTerminalOutput(terminalOutput: string): string {
+        if (!terminalOutput || terminalOutput.trim().length === 0) {
+            return "";
+        }
+
+        const tracebackMarker = "Traceback (most recent call last):";
+        const tracebackIndex = terminalOutput.lastIndexOf(tracebackMarker);
+        if (tracebackIndex >= 0) {
+            return terminalOutput.slice(tracebackIndex).trim();
+        }
+
+        const lines = terminalOutput.split(/\r?\n/).map(line => line.trimEnd());
+        return lines.slice(-80).join("\n").trim();
+    }
+
     /**
      * Model-driven hint that uses terminal output + code context.
      * Reads the traceback, finds the error location in code, and asks guiding questions.
@@ -764,19 +792,20 @@ Now explain the errors:`;
         try {
             whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor, 'targetLevel:', targetLevel);
             const effectiveLevel = targetLevel ?? 2;
+            const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
 
             if (effectiveLevel >= 3) {
-                whybugInfo('hintWithModel using Level 3 prompt (brownies).');
-                return await this.askModel(buildLevel3Prompt(), timeoutMs);
+                const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
+                const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
+                whybugInfo('hintWithModel using Level 3 prompt with code context. snippet length:', safeSnippet.length, 'line:', line);
+                return await this.askModel(buildLevel3Prompt(focusedTerminalOutput || terminalOutput, safeSnippet, line), timeoutMs);
             }
 
-            const { snippet, line } = await this.getCodeContextFromTerminalOutput(terminalOutput, activeEditor, 4);
+            const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
             whybugInfo('hintWithModel code context. snippet length:', snippet?.length ?? 0, 'line:', line);
-            if (!snippet || snippet.length === 0) {
-                return 'No code context available. Try running the code again in the terminal.';
-            }
 
-            const prompt = buildHintPrompt(terminalOutput, snippet, line);
+            const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
+            const prompt = buildHintPrompt(focusedTerminalOutput || terminalOutput, safeSnippet, line);
             whybugInfo('hintWithModel prompt ready. length:', prompt.length);
 
             return await this.askModel(prompt, timeoutMs);
@@ -820,6 +849,7 @@ Now explain the errors:`;
             const lvl = this.getDisplayLevelForErrorType(e.errorType);
             if (lvl > maxLevel) maxLevel = lvl;
         }
+        whybugInfo(`getDisplayLevelForEntries: ${entries.length} entries, computed maxLevel=${maxLevel}`);
         return maxLevel;
     }
 
@@ -830,6 +860,7 @@ Now explain the errors:`;
         const canonical = this.getCanonicalErrorType(errorType);
         const state = this.errorState.get(canonical);
         const recentCount = state ? state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length : 0;
+        whybugInfo(`getDisplayLevelForErrorType(${errorType}): canonical=${canonical}, count=${recentCount}, level=${this.mapCountToDisplayLevel(recentCount)}`);
         return this.mapCountToDisplayLevel(recentCount);
     }
 
@@ -948,7 +979,6 @@ Now explain the errors:`;
             const message = match[2].trim();
             console.log(`[DebugAssistantService] Found error: ${errorType}`);
             entries.push({ errorType, message });
-            this.updateErrorState(errorType);
         }
 
         console.log(`[DebugAssistantService] Extracted ${entries.length} error entries`);
