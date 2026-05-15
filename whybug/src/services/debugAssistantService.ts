@@ -7,7 +7,7 @@ import {
     buildTermsPrompt,
     buildReflectionPrompt 
 } from "../prompts/promptBuilders";
-import { getHybridErrorScore } from "./errorAdaptation";
+import { getHybridErrorScore, getHybridErrorScoreBreakdown } from "./errorAdaptation";
 import { whybugInfo, whybugWarn } from "./logger";
 
 export interface ErrorAnalytics {
@@ -46,8 +46,9 @@ export class DebugAssistantService {
     private readonly RECENT_TERMINAL_WINDOW_MS = 60000; // 60 seconds
 
     // Adaptive prompt configuration (in milliseconds)
-    private readonly WINDOW_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days
-    private readonly HALF_LIFE_MS = 14 * 24 * 60 * 60 * 1000;  // 14 days
+    // Production-like decay: long window and slow half-life so events persist.
+    private readonly WINDOW_MS = 7 * 24 * 60 * 60 * 1000;      // 7 days
+    private readonly HALF_LIFE_MS = 14 * 24 * 60 * 60 * 1000;  // 14 days half-life
     private readonly MAX_TIMESTAMPS = 100;                      // cap storage
 
     // Level thresholds: score < t0 → L0, t0 ≤ score < t1 → L1, score ≥ t1 → L2
@@ -129,6 +130,10 @@ export class DebugAssistantService {
             definition: "This error occurs when maximum recursion depth is exceeded.",
             context: "In practice, a recursive function kept calling itself too deeply."
         },
+        StopError: {
+            definition: "This error indicates an intentional stop or termination raised by the program.",
+            context: "In practice, the code deliberately raised a StopError (or similar) to halt execution, or a library signaled a controlled stop condition."
+        },
         OSError: {
             definition: "This error indicates an operating system related failure, such as file or device issues.",
             context: "In practice, the environment or OS-level resource blocked the operation."
@@ -163,7 +168,10 @@ export class DebugAssistantService {
      */
     private extractErrorType(errorMessage: string): string {
         const match = errorMessage.match(/^([A-Za-z]+Error|[A-Za-z]+Exception|[A-Za-z]+Warning)/);
-        return match ? match[0] : "Error";
+        if (!match) return "Error";
+        const raw = match[0];
+        // Normalize capitalization so variants like `stopError` are treated as `StopError`.
+        return raw.charAt(0).toUpperCase() + raw.slice(1);
     }
 
     /**
@@ -260,6 +268,12 @@ export class DebugAssistantService {
         return 3;
     }
 
+    private mapScoreToDisplayLevel(score: number): number {
+        if (score <= 10) return 1;
+        if (score <= 20) return 2;
+        return 3;
+    }
+
     /**
      * Get analytics for all tracked error types.
      */
@@ -267,19 +281,22 @@ export class DebugAssistantService {
         const results: ErrorAnalytics[] = [];
 
         for (const [errorType, state] of this.errorState.entries()) {
-            const breakdown = getHybridErrorScore(state.timestamps, {
+            const breakdown = getHybridErrorScoreBreakdown(state.timestamps, {
                 windowMs: this.WINDOW_MS,
                 halfLifeMs: this.HALF_LIFE_MS,
                 nowMs: Date.now()
             });
 
-            const recentCount = state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length;
+            const recentCount = breakdown.recentCount;
+            const decayedScore = breakdown.decayedScore;
+            const totalScore = breakdown.totalScore;
+
             results.push({
                 errorType,
                 recentCount,
-                totalScore: breakdown,
+                totalScore,
                 currentLevel: state.currentLevel,
-                displayLevel: this.mapCountToDisplayLevel(recentCount),
+                displayLevel: this.mapScoreToDisplayLevel(totalScore),
                 lastSeenMs: state.lastSeenMs,
                 timestamps: state.timestamps
             });
@@ -859,9 +876,20 @@ Now explain the errors:`;
     public getDisplayLevelForErrorType(errorType: string): number {
         const canonical = this.getCanonicalErrorType(errorType);
         const state = this.errorState.get(canonical);
-        const recentCount = state ? state.timestamps.filter(ts => Date.now() - ts <= this.WINDOW_MS).length : 0;
-        whybugInfo(`getDisplayLevelForErrorType(${errorType}): canonical=${canonical}, count=${recentCount}, level=${this.mapCountToDisplayLevel(recentCount)}`);
-        return this.mapCountToDisplayLevel(recentCount);
+        if (!state) {
+            whybugInfo(`getDisplayLevelForErrorType(${errorType}): no state, defaulting to level 1`);
+            return 1;
+        }
+
+        const breakdown = getHybridErrorScoreBreakdown(state.timestamps, {
+            windowMs: this.WINDOW_MS,
+            halfLifeMs: this.HALF_LIFE_MS,
+            nowMs: Date.now()
+        });
+
+        const totalScore = breakdown.totalScore;
+        whybugInfo(`getDisplayLevelForErrorType(${errorType}): canonical=${canonical}, totalScore=${totalScore}`);
+        return this.mapScoreToDisplayLevel(totalScore);
     }
 
     /**
@@ -968,17 +996,40 @@ Now explain the errors:`;
 
         console.log("[DebugAssistantService] Parsing terminal output for errors...");
         const lines = terminalOutput.split(/\r?\n/);
-        const errorPattern = /([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning))\s*:\s*(.*)$/;
         const entries: Array<{ errorType: string; message: string }> = [];
 
-        for (const line of lines) {
-            const match = line.match(errorPattern);
+        // Prefer the last traceback error line, because that is the line that usually
+        // contains the actual exception type and message we want to track.
+        const tracebackErrorPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning))(?:\s*:\s*(.*))?\s*$/;
+        for (let index = lines.length - 1; index >= 0; index--) {
+            const line = lines[index];
+            const match = line.match(tracebackErrorPattern);
             if (!match) continue;
 
-            const errorType = match[1];
-            const message = match[2].trim();
-            console.log(`[DebugAssistantService] Found error: ${errorType}`);
-            entries.push({ errorType, message });
+            // Normalize and canonicalize the error type so analytics keys are consistent.
+            let rawType = match[1] || "";
+            rawType = rawType.charAt(0).toUpperCase() + rawType.slice(1);
+            const canonicalType = this.getCanonicalErrorType(rawType);
+            const message = (match[2] ?? "").trim();
+            console.log(`[DebugAssistantService] Found traceback error: ${canonicalType}`);
+            entries.push({ errorType: canonicalType, message });
+            break;
+        }
+
+        // If the traceback tail was not enough, fall back to scanning all lines.
+        if (entries.length === 0) {
+            const errorPattern = /([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning))\s*:\s*(.*)$/;
+            for (const line of lines) {
+                const match = line.match(errorPattern);
+                if (!match) continue;
+
+                let rawType = match[1] || "";
+                rawType = rawType.charAt(0).toUpperCase() + rawType.slice(1);
+                const canonicalType = this.getCanonicalErrorType(rawType);
+                const message = match[2].trim();
+                console.log(`[DebugAssistantService] Found error: ${canonicalType}`);
+                entries.push({ errorType: canonicalType, message });
+            }
         }
 
         console.log(`[DebugAssistantService] Extracted ${entries.length} error entries`);

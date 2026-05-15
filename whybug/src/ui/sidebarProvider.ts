@@ -131,6 +131,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <span class="accordion-score">Score: ${a.totalScore.toFixed(2)} — Level: ${a.displayLevel ?? a.currentLevel}</span>
                 </div>
                 <div class="accordion-content" id="content-${idx}" style="display: none;">
+                    <div style="margin-bottom:8px; font-size:12px; color:var(--vscode-descriptionForeground);">
+                        Recent: ${a.recentCount} &nbsp; • &nbsp; Decayed: ${typeof a.totalScore === 'number' ? (a.totalScore - a.recentCount).toFixed(2) : '0.00'}
+                    </div>
                     ${timestampLines}
                 </div>
             </div>
