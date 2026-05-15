@@ -8,6 +8,22 @@ import { DebugAssistantService } from "./services/debugAssistantService";
 import { TerminalOutputCapture } from "./services/terminalOutputCapture";
 import { whybugError, whybugInfo } from "./services/logger";
 
+function chooseBestTerminalOutput(executionOutput: string, terminalOutput: string): string {
+    const execution = executionOutput.trim();
+    const terminal = terminalOutput.trim();
+
+    if (!execution) return terminal;
+    if (!terminal) return execution;
+
+    const executionHasTraceback = /Traceback \(most recent call last\)|[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning):/m.test(execution);
+    const terminalHasTraceback = /Traceback \(most recent call last\)|[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning):/m.test(terminal);
+
+    if (terminalHasTraceback && !executionHasTraceback) return terminal;
+    if (executionHasTraceback && !terminalHasTraceback) return execution;
+
+    return terminal.length >= execution.length ? terminal : execution;
+}
+
 export function activate(context: vscode.ExtensionContext) {
     whybugInfo("WhyBug ACTIVATED");
 
@@ -89,17 +105,19 @@ export function activate(context: vscode.ExtensionContext) {
                 await new Promise((resolve) => setTimeout(resolve, 75));
                 const outputFromExecution = sanitizeOutput(executionOutput.get(event.execution) || "");
                 const outputFromTerminal = terminal ? terminalCapture.getOutputForTerminal(terminal) : terminalCapture.getLastOutput();
-                const terminalOutput = outputFromExecution || outputFromTerminal;
+                const terminalOutput = chooseBestTerminalOutput(outputFromExecution, outputFromTerminal);
                 
                 whybugInfo("Terminal output captured. length:", terminalOutput.length);
                 
                 try {
                     const errorEntries = assistant.extractErrorEntriesFromTerminalOutput(terminalOutput);
                     whybugInfo("Extracted runtime error entries:", errorEntries);
+                    // Update error state with these new entries BEFORE computing display level
+                    assistant.updateErrorStateForEntries(errorEntries);
                     // Store for later access by Hint button (before clearing terminal buffer)
                     assistant.setRecentErrorEntries(errorEntries);
                     assistant.setRecentTerminalOutput(terminalOutput);
-                    // Determine which level prompt to use based on historic counts.
+                    // Determine which level prompt to use based on historic counts (now that state is updated).
                     const displayLevel = assistant.getDisplayLevelForEntries(errorEntries);
                     whybugInfo('Run display level selected:', displayLevel);
 
