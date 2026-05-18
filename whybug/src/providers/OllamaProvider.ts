@@ -12,10 +12,6 @@ export class OllamaProvider implements AIProvider {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      whybugInfo('Ollama askWithTimeout called. prompt length:', prompt?.length ?? 0, 'timeoutMs:', timeoutMs);
-      const preview = typeof prompt === 'string' && prompt.length > 1200 ? prompt.slice(0, 1200) + '\n...<truncated>...' : prompt;
-      whybugInfo('Ollama prompt preview:\n', preview);
-
       const startTime = Date.now();
       const response = await fetch("http://localhost:11434/api/generate", {
         method: "POST",
@@ -34,9 +30,6 @@ export class OllamaProvider implements AIProvider {
       }
 
       const data: OllamaResponse = (await response.json()) as OllamaResponse;
-      const rpreview = typeof data.response === 'string' && data.response.length > 1200 ? data.response.slice(0, 1200) + '\n...<truncated>...' : data.response;
-      whybugInfo('Ollama model response length:', data.response?.length ?? 0);
-      whybugInfo('Ollama model response preview:\n', rpreview);
       return data.response ?? "No response from model.";
     } catch (err: any) {
       if (err.name === 'AbortError') {
