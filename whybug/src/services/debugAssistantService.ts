@@ -9,6 +9,7 @@ import {
 } from "../prompts/promptBuilders";
 // Decay-based scoring temporarily removed; use simple counts for leveling.
 import { whybugInfo, whybugWarn } from "./logger";
+import { collectTracebackCodeSnippet } from "./codeSnippetCollector";
 
 export interface ErrorAnalytics {
     errorType: string;
@@ -49,6 +50,13 @@ export class DebugAssistantService {
     private recentTerminalOutput: string = "";
     private recentTerminalOutputTimestamp: number = 0;
     private readonly RECENT_TERMINAL_WINDOW_MS = 60000; // 60 seconds
+
+    // Store the most recent traceback-aligned code snippet for Hint prompts.
+    private recentCodeSnippet: string = "";
+    private recentCodeSnippetFile: string = "";
+    private recentCodeSnippetLine: number = 0;
+    private recentCodeSnippetTimestamp: number = 0;
+    private readonly RECENT_CODE_CONTEXT_WINDOW_MS = 60000; // 60 seconds
 
     // Configuration
     private readonly MAX_TIMESTAMPS = 100; // cap stored timestamps per error
@@ -415,7 +423,7 @@ Now explain the errors:`;
     /**
      * Explain errors directly from terminal output using the model prompt (Level 1 prompt).
      */
-    public async explainTerminalOutputWithLevel1Prompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
+    public async explainTerminalOutputWithLevel1Prompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 60000): Promise<string> {
         if (!terminalOutput || terminalOutput.trim().length === 0) {
             return "No terminal output captured. Unable to identify errors.";
         }
@@ -430,18 +438,7 @@ Now explain the errors:`;
         try {
             const modelResp = await this.askModel(prompt, timeoutMs);
 
-            // Annotate the model response with display level per error detected.
-            const analytics = this.getErrorAnalytics();
-            const byType = new Map<string, number>();
-            for (const a of analytics) byType.set(a.errorType, a.displayLevel ?? a.currentLevel ?? 0);
-
-            // Build a small header showing level per error type.
-            const levelLines = parsedEntries.map(e => {
-                const lvl = byType.get(e.errorType) ?? 1;
-                return `Level ${lvl} — ${e.errorType}`;
-            });
-
-            return [`${levelLines.join('\n')}`, '', modelResp].join('\n');
+            return modelResp;
         } catch (err: any) {
             console.warn("explainTerminalOutputWithPrompt failed, falling back to deterministic:", err?.message ?? err);
             return this.explainErrorEntriesDeterministic(parsedEntries);
@@ -449,7 +446,7 @@ Now explain the errors:`;
     }
 
     // Backwards-compatible wrapper kept for callers: delegates to Level 1 named method.
-    public async explainTerminalOutputWithPrompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
+    public async explainTerminalOutputWithPrompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 60000): Promise<string> {
         return this.explainTerminalOutputWithLevel1Prompt(terminalOutput, entries, timeoutMs);
     }
 
@@ -633,7 +630,7 @@ Now explain the errors:`;
     }
 
     // Wrapper that attempts a timeout-capable model call when available
-    private async askModel(prompt: string, timeoutMs = 20000): Promise<string> {
+    private async askModel(prompt: string, timeoutMs = 60000): Promise<string> {
         whybugInfo('askModel called. prompt length:', prompt?.length ?? 0, 'timeoutMs:', timeoutMs);
         const preview = typeof prompt === 'string' && prompt.length > 1500 ? prompt.slice(0, 1500) + '\n...<truncated>...' : prompt;
         whybugInfo('Prompt preview:\n', preview);
@@ -826,6 +823,26 @@ Now explain the errors:`;
         this.recentTerminalOutputTimestamp = Date.now();
     }
 
+    public setRecentCodeContext(snippet: string, file?: string, line?: number): void {
+        this.recentCodeSnippet = snippet || "";
+        this.recentCodeSnippetFile = file || "";
+        this.recentCodeSnippetLine = typeof line === 'number' && Number.isFinite(line) ? line : 0;
+        this.recentCodeSnippetTimestamp = Date.now();
+    }
+
+    public getRecentCodeContext(): { snippet: string; file?: string; line?: number } {
+        const now = Date.now();
+        if (now - this.recentCodeSnippetTimestamp > this.RECENT_CODE_CONTEXT_WINDOW_MS) {
+            return { snippet: "" };
+        }
+
+        return {
+            snippet: this.recentCodeSnippet,
+            file: this.recentCodeSnippetFile || undefined,
+            line: this.recentCodeSnippetLine || undefined
+        };
+    }
+
     // Return recent terminal output if it is still fresh.
     public getRecentTerminalOutput(): string {
         const now = Date.now();
@@ -850,55 +867,63 @@ Now explain the errors:`;
         return lines.slice(-80).join("\n").trim();
     }
 
-    private async buildHintPromptForLevel2(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
-        whybugInfo('hintWithLevel2Prompt started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
-        const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
-        const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
-        whybugInfo('hintWithLevel2Prompt code context. snippet length:', snippet?.length ?? 0, 'line:', line);
+    private async getUnifiedHintContext(terminalOutput: string, activeEditor?: vscode.TextEditor): Promise<{
+        normalizedTerminalOutput: string;
+        codeContext: { snippet: string; file?: string; line?: number };
+    }> {
+        const effectiveTerminalOutput = (terminalOutput && terminalOutput.trim().length > 0) ? terminalOutput : this.getRecentTerminalOutput();
+        const normalizedTerminalOutput = this.getFocusedTerminalOutput(effectiveTerminalOutput) || effectiveTerminalOutput;
 
-        const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
-        const prompt = buildHintPrompt(focusedTerminalOutput || terminalOutput, safeSnippet, line);
+        // Always try deriving snippet from the same terminal output first.
+        let codeContext = await this.getCodeContextFromTerminalOutput(normalizedTerminalOutput, activeEditor, 40);
+
+        // If collection from terminal failed, fall back to the last cached snippet.
+        if (!codeContext.snippet) {
+            const cachedContext = this.getRecentCodeContext();
+            if (cachedContext.snippet) {
+                codeContext = cachedContext;
+            }
+        }
+
+        // Keep cache fresh when we have a resolved snippet.
+        if (codeContext.snippet) {
+            this.setRecentCodeContext(codeContext.snippet, codeContext.file, codeContext.line);
+        }
+
+        return { normalizedTerminalOutput, codeContext };
+    }
+
+    private async buildHintPromptForLevel2(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 60000): Promise<string> {
+        whybugInfo('hintWithLevel2Prompt started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
+        const { normalizedTerminalOutput, codeContext } = await this.getUnifiedHintContext(terminalOutput, activeEditor);
+
+        whybugInfo('hintWithLevel2Prompt code context. snippet length:', codeContext.snippet?.length ?? 0, 'line:', codeContext.line);
+
+        const safeSnippet = codeContext.snippet && codeContext.snippet.length > 0 ? codeContext.snippet : 'No code snippet available.';
+        const prompt = buildHintPrompt(normalizedTerminalOutput, safeSnippet, codeContext.line);
         whybugInfo('hintWithLevel2Prompt prompt ready. length:', prompt.length);
         return this.askModel(prompt, timeoutMs);
     }
 
-    private async buildHintPromptForLevel3(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
+    private async buildHintPromptForLevel3(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 60000): Promise<string> {
         whybugInfo('hintWithLevel3Prompt started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
-        const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
-        const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
-        const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
-        whybugInfo('hintWithLevel3Prompt using Level 3 prompt with code context. snippet length:', safeSnippet.length, 'line:', line);
-        return this.askModel(buildLevel3Prompt(focusedTerminalOutput || terminalOutput, safeSnippet, line), timeoutMs);
+        const { normalizedTerminalOutput, codeContext } = await this.getUnifiedHintContext(terminalOutput, activeEditor);
+
+        const safeSnippet = codeContext.snippet && codeContext.snippet.length > 0 ? codeContext.snippet : 'No code snippet available.';
+        whybugInfo('hintWithLevel3Prompt using Level 3 prompt with code context. snippet length:', safeSnippet.length, 'line:', codeContext.line);
+        return this.askModel(buildLevel3Prompt(normalizedTerminalOutput, safeSnippet, codeContext.line), timeoutMs);
     }
 
-    public async hintWithLevel2Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
-        try {
-            return await this.buildHintPromptForLevel2(terminalOutput, activeEditor, timeoutMs);
-        } catch (err: any) {
-            console.warn('hintWithLevel2Prompt failed, falling back to deterministic:', err?.message ?? err);
-            const entries = this.getRecentErrorEntries();
-            if (entries.length > 0) {
-                return this.deterministicHintsFromEntriesWithContext(entries);
-            }
-            return 'Unable to generate hint. Try running the code again.';
-        }
+    public async hintWithLevel2Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 60000): Promise<string> {
+        return await this.buildHintPromptForLevel2(terminalOutput, activeEditor, timeoutMs);
     }
 
-    public async hintWithLevel3Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
-        try {
-            return await this.buildHintPromptForLevel3(terminalOutput, activeEditor, timeoutMs);
-        } catch (err: any) {
-            console.warn('hintWithLevel3Prompt failed, falling back to deterministic:', err?.message ?? err);
-            const entries = this.getRecentErrorEntries();
-            if (entries.length > 0) {
-                return this.deterministicHintsFromEntriesWithContext(entries);
-            }
-            return 'Unable to generate hint. Try running the code again.';
-        }
+    public async hintWithLevel3Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 60000): Promise<string> {
+        return await this.buildHintPromptForLevel3(terminalOutput, activeEditor, timeoutMs);
     }
 
     // Backwards-compatible wrapper kept for callers: delegates to the level-specific method.
-    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000, targetLevel?: number): Promise<string> {
+    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 60000, targetLevel?: number): Promise<string> {
         if ((targetLevel ?? 2) >= 3) {
             return this.hintWithLevel3Prompt(terminalOutput, activeEditor, timeoutMs);
         }
@@ -945,78 +970,19 @@ Now explain the errors:`;
     }
 
     /**
-     * Extract the last traceback file and line from terminal output.
-     * Returns { file, line } or empty object if not found.
-     */
-    public extractTracebackLocation(terminalOutput: string): { file?: string; line?: number } {
-        if (!terminalOutput) return {};
-        // Match lines like: File "/path/to/file.py", line 42, in <module>
-        const regex = /File "([^"]+)", line (\d+)/g;
-        let match: RegExpExecArray | null;
-        let last: RegExpExecArray | null = null;
-        while ((match = regex.exec(terminalOutput)) !== null) {
-            last = match;
-        }
-
-        if (!last) return {};
-        const file = last[1];
-        const line = parseInt(last[2], 10);
-        if (!Number.isFinite(line)) return {};
-        return { file, line };
-    }
-
-    /**
      * Given terminal output and an optional active editor, return a small code snippet
      * around the traceback location. Attempts to open the file path if present, otherwise
      * falls back to the active editor document.
      */
     public async getCodeContextFromTerminalOutput(terminalOutput: string, activeEditor?: vscode.TextEditor, contextRadius = 4): Promise<{ snippet: string; file?: string; line?: number }> {
-        const loc = this.extractTracebackLocation(terminalOutput);
-        let snippet = "";
-        if (loc.file) {
-            try {
-                const doc = await vscode.workspace.openTextDocument(loc.file);
-                const total = doc.lineCount;
-                const start = Math.max(0, (loc.line || 1) - 1 - contextRadius);
-                const end = Math.min(total - 1, (loc.line || 1) - 1 + contextRadius);
-                const lines: string[] = [];
-                for (let i = start; i <= end; i++) {
-                    lines.push(`${i + 1}: ${doc.lineAt(i).text}`);
-                }
-                snippet = lines.join("\n");
-                return { snippet, file: loc.file, line: loc.line };
-            } catch (err) {
-                // failed to open file; fall through to active editor
-                console.warn("getCodeContextFromTerminalOutput: failed to open file", loc.file, err);
-            }
-        }
-
-        if (activeEditor) {
-            try {
-                const doc = activeEditor.document;
-                const total = doc.lineCount;
-                // If traceback gave a line number, use it; otherwise use current cursor line
-                const center = loc.line && loc.line > 0 ? loc.line - 1 : activeEditor.selection.active.line;
-                const start = Math.max(0, center - contextRadius);
-                const end = Math.min(total - 1, center + contextRadius);
-                const lines: string[] = [];
-                for (let i = start; i <= end; i++) {
-                    lines.push(`${i + 1}: ${doc.lineAt(i).text}`);
-                }
-                snippet = lines.join("\n");
-                return { snippet, file: doc.uri.fsPath, line: loc.line };
-            } catch (err) {
-                console.warn("getCodeContextFromTerminalOutput: failed to read active editor", err);
-            }
-        }
-
-        return { snippet: "" };
+        const context = await collectTracebackCodeSnippet(terminalOutput, contextRadius);
+        return context;
     }
 
     /**
      * Explain important terms from the current file using the model prompt.
      */
-    public async termsWithModel(code: string, timeoutMs = 20000): Promise<string> {
+    public async termsWithModel(code: string, timeoutMs = 60000): Promise<string> {
         if (!code || code.trim().length === 0) {
             return "No code provided to extract terms.";
         }

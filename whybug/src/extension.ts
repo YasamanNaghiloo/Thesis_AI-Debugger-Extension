@@ -24,6 +24,11 @@ function chooseBestTerminalOutput(executionOutput: string, terminalOutput: strin
     return terminal.length >= execution.length ? terminal : execution;
 }
 
+function stripLeadingLevelHeader(text: string): string {
+    const trimmed = text.replace(/^\s+/, "");
+    return trimmed.replace(/^(Level\s+\d+\s+—\s+.*\n)+/i, "").replace(/^\s+/, "");
+}
+
 export function activate(context: vscode.ExtensionContext) {
     whybugInfo("WhyBug ACTIVATED");
 
@@ -33,6 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
     const tracker = new ErrorTracker(context);
     terminalCapture.start();
     const executionOutput = new WeakMap<any, string>();
+    const handledExecutions = new WeakSet<any>();
 
     const sanitizeOutput = (data: string): string => {
         return data
@@ -97,6 +103,11 @@ export function activate(context: vscode.ExtensionContext) {
         whybugInfo("Terminal listener API available");
         terminalListener = (vscode.window as any).onDidEndTerminalShellExecution(async (event: any) => {
             whybugInfo("Terminal execution ended. Exit code:", event.exitCode);
+
+                if (event.execution && handledExecutions.has(event.execution)) {
+                    whybugInfo("Skipping duplicate terminal execution event.");
+                    return;
+                }
             
             if (event.exitCode !== 0) {
                 sidebar.beginThinking();
@@ -117,22 +128,33 @@ export function activate(context: vscode.ExtensionContext) {
                     // Store for later access by Hint button (before clearing terminal buffer)
                     assistant.setRecentErrorEntries(errorEntries);
                     assistant.setRecentTerminalOutput(terminalOutput);
+                    const codeContext = await assistant.getCodeContextFromTerminalOutput(terminalOutput, undefined, 40);
+                    assistant.setRecentCodeContext(codeContext.snippet, codeContext.file, codeContext.line);
                     // Determine which level prompt to use based on historic counts (now that state is updated).
                     const displayLevel = assistant.getDisplayLevelForEntries(errorEntries);
                     whybugInfo('Run display level selected:', displayLevel);
 
+                    const levelHeader = assistant.formatDisplayLevelHeaders(errorEntries);
+                    const withHeader = (body: string) => {
+                        const normalizedBody = stripLeadingLevelHeader(body);
+                        return levelHeader ? `${levelHeader}\n\n${normalizedBody}` : normalizedBody;
+                    };
+
                     if (displayLevel === 1) {
                         const response = await assistant.explainTerminalOutputWithLevel1Prompt(terminalOutput, errorEntries);
-                        sidebar.streamResponse(response);
+                        sidebar.streamResponse(withHeader(response));
                         sidebar.showHintPrompt();
                     } else if (displayLevel === 2) {
-                        const response = await assistant.hintWithLevel2Prompt(terminalOutput, vscode.window.activeTextEditor, 25000);
-                        sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
+                        const response = await assistant.hintWithLevel2Prompt(terminalOutput, vscode.window.activeTextEditor, 60000);
+                        sidebar.streamResponse(withHeader(response));
                         sidebar.showHintPrompt();
                     } else {
-                        const response = await assistant.hintWithLevel3Prompt(terminalOutput, vscode.window.activeTextEditor, 25000);
-                        sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
+                        const response = await assistant.hintWithLevel3Prompt(terminalOutput, vscode.window.activeTextEditor, 60000);
+                        sidebar.streamResponse(withHeader(response));
                         sidebar.showHintPrompt();
+                    }
+                    if (event.execution) {
+                        handledExecutions.add(event.execution);
                     }
                     if (terminal) {
                         terminalCapture.clearTerminal(terminal);

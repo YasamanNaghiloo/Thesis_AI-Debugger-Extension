@@ -3,12 +3,11 @@ export function buildExplainErrorPrompt(terminalOutput: string): string {
 
 TASK:
 - Read the terminal output below.
-- Find only the error(s) that actually appear in the output.
-- For each error, explain what it means in plain language.
-- Do not use the code file or code snippet.
-- Keep the response focused on the error type and the traceback text.
-- If the traceback shows a file and line, mention them briefly.
+- Find only the error(s) that actually appear in the output. Do not assume anything else, only look at the provided terminal output below.
+- For each error, explain what it means in plain language that a beginner would understand.
 - Keep the response short and simple.
+- Return exactly one bullet point per error and nothing else.
+- Do not add any extra headings, preambles, or closing lines.
 
 FORMAT:
 - **ErrorType**: what this error means.
@@ -18,7 +17,7 @@ ${terminalOutput}
 `;
 }
 
-export function buildLevel3Prompt(terminalOutput: string, codeSnippet: string, line?: number): string {
+export function buildHintPrompt(terminalOutput: string, codeSnippet: string, line?: number): string {
   const lineContext = typeof line === 'number' && Number.isFinite(line) ? `The traceback points near line ${line}.` : 'The traceback line may be inferred from the terminal output.';
 
   return `You are WhyBug, an advanced debugging tutor.
@@ -26,9 +25,12 @@ export function buildLevel3Prompt(terminalOutput: string, codeSnippet: string, l
 TASK:
 - Read the terminal traceback and the code snippet together.
 - Focus on the specific traceback line and the surrounding code.
-- Give 3 short observations or questions that help the user reason about the deeper cause.
+- Write in a natural, conversational flow that starts with observations and then asks helpful questions.
 - Do not give a direct fix or rewrite the code.
-- Be slightly more thorough than Level 2, but still concise.
+- Write in a natural flow: start with a couple of observations, then end with a few helpful, guiding questions.
+- Return short bullet points without numbering or labels.
+- Keep each bullet to a few sentences.
+- Do not add any extra headings, preambles, or closing lines.
 
 ${lineContext}
 
@@ -40,16 +42,15 @@ ${codeSnippet}
 `;
 }
 
-export function buildHintPrompt(terminalOutput: string, codeSnippet: string, line?: number): string {
+export function buildLevel3Prompt(terminalOutput: string, codeSnippet: string, line?: number): string {
+  const lineContext = typeof line === 'number' && Number.isFinite(line) ? `The traceback points near line ${line}.` : 'The traceback line may be inferred from the terminal output.';
   return `You are WhyBug, a concise debugging tutor.
 
 INSTRUCTIONS:
 - Only use the provided TERMINAL OUTPUT and CODE SNIPPET. Do not assume anything else.
-- Identify the single traceback line referenced by the TERMINAL OUTPUT. If none, state "No traceback line found." and stop.
-- Using that line and surrounding lines from the CODE SNIPPET for context, produce 2 or 3 items (questions or observations) for the purpose of guiding the user to understanding their error.
-- Do NOT provide any direct solutions, code fixes, or guesses about the user's intent. Only guide them to understand the error better.
-- Be concise and focused on the error line and its immediate context. Do not take more than 5 sentences to explain/ use socratic questioning.
-- Also ensure that you are providing real relevant guidance, don't ask irrelevant questions. Remeber, the entire point of this is to help the user understand these errors and why they happen, and how to avoid them. 
+- Using the TERMINAL OUTPUT, find in the CODE SNIPPET where the error happened.
+- Provide a few examples of concrete ways to fix this error.
+- Ask socratic questions that guide the student into choosing what fix they should use and why for their context.
 
 TERMINAL OUTPUT:
 ${terminalOutput}
@@ -66,14 +67,7 @@ TASK:
 - Read the full code file below.
 - Find the technical terms a beginner should know to understand this file.
 - Focus on code concepts, not guesses about the author's intent.
-- Prefer functions, classes, imported modules, parameters, operators, return values, literals, conditions, loops, collections, and variables.
-- Define each term in beginner-friendly technical language.
-- If you can infer a data type from the code, state the type explicitly.
-- If a variable is not clearly typed, describe it neutrally as a value stored in a variable instead of guessing its purpose.
-- Do NOT invent a story for what a name means.
-- Do NOT say that a variable is a message, price, total, customer, or item unless the code itself makes that clear.
-- Do NOT explain every word in the file.
-- Return 5 to 12 terms maximum.
+- Do not assume anything about what the author is trying to do- just define what different asects of the code are in their most literal, defining sense.
 - Put one term per line in this format: **term**: explanation.
 
 CODE FILE:

@@ -53,10 +53,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Gather terminal output (preferred) and editor code (optional)
+                    const cachedTerminalOutput = this.assistant.getRecentTerminalOutput();
                     const liveTerminalOutput = this.terminalCapture ? this.terminalCapture.getLastOutput() : "";
-                    const terminalOutput = liveTerminalOutput && liveTerminalOutput.trim().length > 0
-                        ? liveTerminalOutput
-                        : this.assistant.getRecentTerminalOutput();
+                    const terminalOutput = cachedTerminalOutput && cachedTerminalOutput.trim().length > 0
+                        ? cachedTerminalOutput
+                        : liveTerminalOutput;
                     const editor = vscode.window.activeTextEditor;
                     const code = editor ? editor.document.getText() : "";
 
@@ -75,8 +76,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.assistant.consumeRecentHintEscalation();
                         this.beginThinking();
                         const response = targetLevel >= 3
-                            ? await this.assistant.hintWithLevel3Prompt(terminalOutput, editor, 25000)
-                            : await this.assistant.hintWithLevel2Prompt(terminalOutput, editor, 25000);
+                            ? await this.assistant.hintWithLevel3Prompt(terminalOutput, editor, 60000)
+                            : await this.assistant.hintWithLevel2Prompt(terminalOutput, editor, 60000);
                         this.streamResponse(response);
                         return;
                     }
