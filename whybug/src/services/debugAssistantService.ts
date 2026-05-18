@@ -7,23 +7,28 @@ import {
     buildTermsPrompt,
     buildReflectionPrompt 
 } from "../prompts/promptBuilders";
-import { getHybridErrorScore, getHybridErrorScoreBreakdown } from "./errorAdaptation";
+// Decay-based scoring temporarily removed; use simple counts for leveling.
 import { whybugInfo, whybugWarn } from "./logger";
 
 export interface ErrorAnalytics {
     errorType: string;
     recentCount: number;
+    rawCount: number;
     totalScore: number;
     currentLevel: number;
     displayLevel?: number;
     lastSeenMs: number;
     timestamps: number[];
+    manualCountOverride?: number;
+    manualCountAnchorRawCount?: number;
 }
 
 interface ErrorState {
     timestamps: number[];
     currentLevel: number;
     lastSeenMs: number;
+    manualCountOverride?: number;
+    manualCountAnchorRawCount?: number;
 }
 
 export class DebugAssistantService {
@@ -45,17 +50,11 @@ export class DebugAssistantService {
     private recentTerminalOutputTimestamp: number = 0;
     private readonly RECENT_TERMINAL_WINDOW_MS = 60000; // 60 seconds
 
-    // Adaptive prompt configuration (in milliseconds)
-    // Production-like decay: long window and slow half-life so events persist.
-    private readonly WINDOW_MS = 7 * 24 * 60 * 60 * 1000;      // 7 days
-    private readonly HALF_LIFE_MS = 14 * 24 * 60 * 60 * 1000;  // 14 days half-life
-    private readonly MAX_TIMESTAMPS = 100;                      // cap storage
+    // Configuration
+    private readonly MAX_TIMESTAMPS = 100; // cap stored timestamps per error
 
-    // Level thresholds: score < t0 → L0, t0 ≤ score < t1 → L1, score ≥ t1 → L2
-    private readonly LEVEL_THRESHOLDS = {
-        l1: 1.5,
-        l2: 4.0
-    };
+    // Dev mode lets the analytics page manually override per-error counts.
+    private devModeEnabled = false;
 
     // Per-error state: errorType → { timestamps, currentLevel, lastSeenMs }
     private errorState: Map<string, ErrorState> = new Map();
@@ -63,6 +62,53 @@ export class DebugAssistantService {
     constructor(context?: vscode.ExtensionContext) {
         this.context = context;
         if (this.context) this.loadPersistedState();
+    }
+
+    public isDevModeEnabled(): boolean {
+        return this.devModeEnabled;
+    }
+
+    public setDevModeEnabled(enabled: boolean): void {
+        this.devModeEnabled = enabled;
+        void this.savePersistedState();
+    }
+
+    public setManualErrorCount(errorType: string, count: number): void {
+        const canonical = this.getCanonicalErrorType(errorType);
+        const normalizedCount = Math.max(1, Math.floor(Number(count) || 0));
+        const nowMs = Date.now();
+        let state = this.errorState.get(canonical);
+        if (!state) {
+            state = { timestamps: [], currentLevel: 0, lastSeenMs: nowMs, manualCountOverride: normalizedCount, manualCountAnchorRawCount: 0 };
+            this.errorState.set(canonical, state);
+        } else {
+            state.manualCountOverride = normalizedCount;
+            state.manualCountAnchorRawCount = state.timestamps.length;
+            state.lastSeenMs = nowMs;
+        }
+
+        if (typeof state.manualCountAnchorRawCount !== 'number') {
+            state.manualCountAnchorRawCount = state.timestamps.length;
+        }
+
+        state.currentLevel = this.computeLevel(canonical);
+        void this.savePersistedState();
+    }
+
+    public getManualErrorCount(errorType: string): number | undefined {
+        const canonical = this.getCanonicalErrorType(errorType);
+        const state = this.errorState.get(canonical);
+        return state?.manualCountOverride;
+    }
+
+    private getEffectiveErrorCount(state: ErrorState): number {
+        if (typeof state.manualCountOverride !== 'number') {
+            return state.timestamps.length;
+        }
+
+        const anchorRawCount = typeof state.manualCountAnchorRawCount === 'number' ? state.manualCountAnchorRawCount : state.timestamps.length;
+        const delta = state.timestamps.length - anchorRawCount;
+        return Math.max(1, state.manualCountOverride + Math.max(0, delta));
     }
 
     private readonly errorTypeDefinitions: Record<string, { definition: string; context: string }> = {
@@ -214,12 +260,15 @@ export class DebugAssistantService {
     private loadPersistedState(): void {
         if (!this.context) return;
         try {
+            this.devModeEnabled = this.context.workspaceState.get<boolean>("whybug.devModeEnabled", false);
             const raw = this.context.workspaceState.get<Record<string, any>>("whybug.errorState", {});
             for (const [key, value] of Object.entries(raw || {})) {
                 const timestamps = Array.isArray(value.timestamps) ? value.timestamps.filter((t: any) => Number.isFinite(t)).map((t: any) => Number(t)) : [];
                 const currentLevel = typeof value.currentLevel === 'number' ? value.currentLevel : 0;
                 const lastSeenMs = typeof value.lastSeenMs === 'number' ? value.lastSeenMs : 0;
-                this.errorState.set(key, { timestamps, currentLevel, lastSeenMs });
+                const manualCountOverride = typeof value.manualCountOverride === 'number' ? value.manualCountOverride : undefined;
+                const manualCountAnchorRawCount = typeof value.manualCountAnchorRawCount === 'number' ? value.manualCountAnchorRawCount : undefined;
+                this.errorState.set(key, { timestamps, currentLevel, lastSeenMs, manualCountOverride, manualCountAnchorRawCount });
             }
         } catch (err) {
             console.warn("Failed to load persisted error state", err);
@@ -233,11 +282,14 @@ export class DebugAssistantService {
             serializable[key] = {
                 timestamps: state.timestamps,
                 currentLevel: state.currentLevel,
-                lastSeenMs: state.lastSeenMs
+                lastSeenMs: state.lastSeenMs,
+                manualCountOverride: state.manualCountOverride,
+                manualCountAnchorRawCount: state.manualCountAnchorRawCount
             };
         }
 
         try {
+            await this.context.workspaceState.update("whybug.devModeEnabled", this.devModeEnabled);
             await this.context.workspaceState.update("whybug.errorState", serializable);
         } catch (err) {
             console.warn("Failed to save persisted error state", err);
@@ -249,17 +301,14 @@ export class DebugAssistantService {
      */
     private computeLevel(canonicalErrorType: string): number {
         const state = this.errorState.get(canonicalErrorType);
-        if (!state) return 0;
+        if (!state) return 1;
 
-        const score = getHybridErrorScore(state.timestamps, {
-            windowMs: this.WINDOW_MS,
-            halfLifeMs: this.HALF_LIFE_MS,
-            nowMs: Date.now()
-        });
-
-        if (score >= this.LEVEL_THRESHOLDS.l2) return 2;
-        if (score >= this.LEVEL_THRESHOLDS.l1) return 1;
-        return 0;
+        // Simple count-based leveling while decay is disabled:
+        // 1-10 -> level 1, 11-20 -> level 2, 21+ -> level 3
+        const count = this.getEffectiveErrorCount(state);
+        if (count <= 10) return 1;
+        if (count <= 20) return 2;
+        return 3;
     }
 
     private mapCountToDisplayLevel(count: number): number {
@@ -281,24 +330,19 @@ export class DebugAssistantService {
         const results: ErrorAnalytics[] = [];
 
         for (const [errorType, state] of this.errorState.entries()) {
-            const breakdown = getHybridErrorScoreBreakdown(state.timestamps, {
-                windowMs: this.WINDOW_MS,
-                halfLifeMs: this.HALF_LIFE_MS,
-                nowMs: Date.now()
-            });
-
-            const recentCount = breakdown.recentCount;
-            const decayedScore = breakdown.decayedScore;
-            const totalScore = breakdown.totalScore;
+            const rawCount = state.timestamps.length;
+            const effectiveCount = this.getEffectiveErrorCount(state);
 
             results.push({
                 errorType,
-                recentCount,
-                totalScore,
+                recentCount: effectiveCount,
+                rawCount,
+                totalScore: effectiveCount,
                 currentLevel: state.currentLevel,
-                displayLevel: this.mapScoreToDisplayLevel(totalScore),
+                displayLevel: this.mapCountToDisplayLevel(effectiveCount),
                 lastSeenMs: state.lastSeenMs,
-                timestamps: state.timestamps
+                timestamps: state.timestamps,
+                manualCountOverride: state.manualCountOverride
             });
         }
 
@@ -369,9 +413,9 @@ Now explain the errors:`;
     }
 
     /**
-     * Explain errors directly from terminal output using the model prompt.
+     * Explain errors directly from terminal output using the model prompt (Level 1 prompt).
      */
-    public async explainTerminalOutputWithPrompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
+    public async explainTerminalOutputWithLevel1Prompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
         if (!terminalOutput || terminalOutput.trim().length === 0) {
             return "No terminal output captured. Unable to identify errors.";
         }
@@ -402,6 +446,11 @@ Now explain the errors:`;
             console.warn("explainTerminalOutputWithPrompt failed, falling back to deterministic:", err?.message ?? err);
             return this.explainErrorEntriesDeterministic(parsedEntries);
         }
+    }
+
+    // Backwards-compatible wrapper kept for callers: delegates to Level 1 named method.
+    public async explainTerminalOutputWithPrompt(terminalOutput: string, entries?: Array<{ errorType: string; message: string }>, timeoutMs = 20000): Promise<string> {
+        return this.explainTerminalOutputWithLevel1Prompt(terminalOutput, entries, timeoutMs);
     }
 
     /**
@@ -801,58 +850,59 @@ Now explain the errors:`;
         return lines.slice(-80).join("\n").trim();
     }
 
-    /**
-     * Model-driven hint that uses terminal output + code context.
-     * Reads the traceback, finds the error location in code, and asks guiding questions.
-     */
-    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000, targetLevel?: number): Promise<string> {
+    private async buildHintPromptForLevel2(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
+        whybugInfo('hintWithLevel2Prompt started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
+        const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
+        const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
+        whybugInfo('hintWithLevel2Prompt code context. snippet length:', snippet?.length ?? 0, 'line:', line);
+
+        const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
+        const prompt = buildHintPrompt(focusedTerminalOutput || terminalOutput, safeSnippet, line);
+        whybugInfo('hintWithLevel2Prompt prompt ready. length:', prompt.length);
+        return this.askModel(prompt, timeoutMs);
+    }
+
+    private async buildHintPromptForLevel3(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
+        whybugInfo('hintWithLevel3Prompt started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor);
+        const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
+        const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
+        const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
+        whybugInfo('hintWithLevel3Prompt using Level 3 prompt with code context. snippet length:', safeSnippet.length, 'line:', line);
+        return this.askModel(buildLevel3Prompt(focusedTerminalOutput || terminalOutput, safeSnippet, line), timeoutMs);
+    }
+
+    public async hintWithLevel2Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
         try {
-            whybugInfo('hintWithModel started. terminalOutput length:', terminalOutput?.length ?? 0, 'activeEditor present:', !!activeEditor, 'targetLevel:', targetLevel);
-            const effectiveLevel = targetLevel ?? 2;
-            const focusedTerminalOutput = this.getFocusedTerminalOutput(terminalOutput);
-
-            if (effectiveLevel >= 3) {
-                const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
-                const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
-                whybugInfo('hintWithModel using Level 3 prompt with code context. snippet length:', safeSnippet.length, 'line:', line);
-                return await this.askModel(buildLevel3Prompt(focusedTerminalOutput || terminalOutput, safeSnippet, line), timeoutMs);
-            }
-
-            const { snippet, line } = await this.getCodeContextFromTerminalOutput(focusedTerminalOutput || terminalOutput, activeEditor, 4);
-            whybugInfo('hintWithModel code context. snippet length:', snippet?.length ?? 0, 'line:', line);
-
-            const safeSnippet = snippet && snippet.length > 0 ? snippet : 'No code snippet available.';
-            const prompt = buildHintPrompt(focusedTerminalOutput || terminalOutput, safeSnippet, line);
-            whybugInfo('hintWithModel prompt ready. length:', prompt.length);
-
-            return await this.askModel(prompt, timeoutMs);
+            return await this.buildHintPromptForLevel2(terminalOutput, activeEditor, timeoutMs);
         } catch (err: any) {
-            console.warn('hintWithModel failed, falling back to deterministic:', err?.message ?? err);
-            const effectiveLevel = targetLevel ?? 2;
-            if (effectiveLevel >= 3) {
-                return [
-                    "Ingredients:",
-                    "- 1/2 cup butter",
-                    "- 1 cup sugar",
-                    "- 2 eggs",
-                    "- 1 tsp vanilla",
-                    "- 1/3 cup cocoa powder",
-                    "- 1/2 cup flour",
-                    "- 1/4 tsp salt",
-                    "",
-                    "Steps:",
-                    "1. Preheat oven to 350°F (175°C).",
-                    "2. Melt the butter, then mix in sugar, eggs, and vanilla.",
-                    "3. Stir in cocoa powder, flour, and salt.",
-                    "4. Pour into a greased pan and bake for 20-25 minutes."
-                ].join('\n');
-            }
+            console.warn('hintWithLevel2Prompt failed, falling back to deterministic:', err?.message ?? err);
             const entries = this.getRecentErrorEntries();
             if (entries.length > 0) {
                 return this.deterministicHintsFromEntriesWithContext(entries);
             }
             return 'Unable to generate hint. Try running the code again.';
         }
+    }
+
+    public async hintWithLevel3Prompt(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000): Promise<string> {
+        try {
+            return await this.buildHintPromptForLevel3(terminalOutput, activeEditor, timeoutMs);
+        } catch (err: any) {
+            console.warn('hintWithLevel3Prompt failed, falling back to deterministic:', err?.message ?? err);
+            const entries = this.getRecentErrorEntries();
+            if (entries.length > 0) {
+                return this.deterministicHintsFromEntriesWithContext(entries);
+            }
+            return 'Unable to generate hint. Try running the code again.';
+        }
+    }
+
+    // Backwards-compatible wrapper kept for callers: delegates to the level-specific method.
+    public async hintWithModel(terminalOutput: string, activeEditor?: vscode.TextEditor, timeoutMs = 25000, targetLevel?: number): Promise<string> {
+        if ((targetLevel ?? 2) >= 3) {
+            return this.hintWithLevel3Prompt(terminalOutput, activeEditor, timeoutMs);
+        }
+        return this.hintWithLevel2Prompt(terminalOutput, activeEditor, timeoutMs);
     }
 
     /**
@@ -881,15 +931,9 @@ Now explain the errors:`;
             return 1;
         }
 
-        const breakdown = getHybridErrorScoreBreakdown(state.timestamps, {
-            windowMs: this.WINDOW_MS,
-            halfLifeMs: this.HALF_LIFE_MS,
-            nowMs: Date.now()
-        });
-
-        const totalScore = breakdown.totalScore;
-        whybugInfo(`getDisplayLevelForErrorType(${errorType}): canonical=${canonical}, totalScore=${totalScore}`);
-        return this.mapScoreToDisplayLevel(totalScore);
+        const count = this.getEffectiveErrorCount(state);
+        whybugInfo(`getDisplayLevelForErrorType(${errorType}): canonical=${canonical}, count=${count}`);
+        return this.mapCountToDisplayLevel(count);
     }
 
     /**
