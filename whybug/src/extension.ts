@@ -122,15 +122,15 @@ export function activate(context: vscode.ExtensionContext) {
                     whybugInfo('Run display level selected:', displayLevel);
 
                     if (displayLevel === 1) {
-                        const response = await assistant.explainTerminalOutputWithPrompt(terminalOutput, errorEntries);
+                        const response = await assistant.explainTerminalOutputWithLevel1Prompt(terminalOutput, errorEntries);
                         sidebar.streamResponse(response);
                         sidebar.showHintPrompt();
                     } else if (displayLevel === 2) {
-                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000, 2);
+                        const response = await assistant.hintWithLevel2Prompt(terminalOutput, vscode.window.activeTextEditor, 25000);
                         sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
                         sidebar.showHintPrompt();
                     } else {
-                        const response = await assistant.hintWithModel(terminalOutput, vscode.window.activeTextEditor, 25000, 3);
+                        const response = await assistant.hintWithLevel3Prompt(terminalOutput, vscode.window.activeTextEditor, 25000);
                         sidebar.streamResponse(`${assistant.formatDisplayLevelHeaders(errorEntries)}\n\n${response}`);
                         sidebar.showHintPrompt();
                     }
