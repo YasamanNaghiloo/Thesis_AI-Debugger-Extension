@@ -21,6 +21,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
+            if (data.command === 'toggleDevMode') {
+                this.assistant.setDevModeEnabled(!!data.enabled);
+                this.streamResponse(this.formatAnalytics(this.assistant.getErrorAnalytics()));
+                return;
+            }
+
+            if (data.command === 'setManualCount') {
+                if (this.assistant.isDevModeEnabled()) {
+                    this.assistant.setManualErrorCount(String(data.errorType ?? ''), Number(data.count));
+                }
+                this.streamResponse(this.formatAnalytics(this.assistant.getErrorAnalytics()));
+                return;
+            }
+
             if (data.command === 'hideHintPrompt') {
                 this.hideHintPrompt();
                 return;
@@ -60,7 +74,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
                         this.assistant.consumeRecentHintEscalation();
                         this.beginThinking();
-                        const response = await this.assistant.hintWithModel(terminalOutput, editor, 25000, targetLevel);
+                        const response = targetLevel >= 3
+                            ? await this.assistant.hintWithLevel3Prompt(terminalOutput, editor, 25000)
+                            : await this.assistant.hintWithLevel2Prompt(terminalOutput, editor, 25000);
                         this.streamResponse(response);
                         return;
                     }
@@ -106,6 +122,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     public update(text: string) { this.postMessage(text, false); }
 
+    private escapeHtml(text: string): string {
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     private postMessage(text: string, clear: boolean) {
         this._view?.webview.postMessage({ type: "update", text, clear });
     }
@@ -115,6 +140,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return "No errors tracked yet. Make some mistakes to see your error levels!";
         }
 
+        const devModeEnabled = this.assistant.isDevModeEnabled();
+
         const errorBlocks = analytics.map((a, idx) => {
             const timestampLines = a.timestamps.map((ts: number) => {
                 const relativeTime = this.getRelativeTime(ts);
@@ -123,16 +150,38 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return `<div class="timestamp-item">${relativeTime} — ${timeStr}</div>`;
             }).join("");
 
+            const manualCount = typeof a.manualCountOverride === 'number' ? a.manualCountOverride : a.recentCount;
+            const rawCount = typeof a.rawCount === 'number' ? a.rawCount : a.timestamps.length;
+            const errorTypeSafe = JSON.stringify(a.errorType);
+
             return `
             <div class="accordion-item">
                 <div class="accordion-header" onclick="toggleAccordion(${idx})">
                     <span class="accordion-chevron" id="chevron-${idx}">▶</span>
-                    <span class="accordion-title"><strong>${a.errorType}</strong></span>
-                    <span class="accordion-score">Score: ${a.totalScore.toFixed(2)} — Level: ${a.displayLevel ?? a.currentLevel}</span>
+                    <span class="accordion-title"><strong>${this.escapeHtml(a.errorType)}</strong></span>
+                    <span class="accordion-score">Count: ${manualCount} — Level: ${a.displayLevel ?? a.currentLevel}</span>
                 </div>
                 <div class="accordion-content" id="content-${idx}" style="display: none;">
-                    <div style="margin-bottom:8px; font-size:12px; color:var(--vscode-descriptionForeground);">
-                        Recent: ${a.recentCount} &nbsp; • &nbsp; Decayed: ${typeof a.totalScore === 'number' ? (a.totalScore - a.recentCount).toFixed(2) : '0.00'}
+                    <div style="margin-bottom:8px; font-size:12px; color:var(--vscode-descriptionForeground); display:flex; flex-direction:column; gap:6px;">
+                        <div>Observed: ${rawCount} &nbsp; • &nbsp; Effective: ${manualCount}</div>
+                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                            <label for="count-${idx}">Manual count</label>
+                            <input
+                                id="count-${idx}"
+                                class="manual-count-input"
+                                data-error-type=${errorTypeSafe}
+                                type="number"
+                                min="1"
+                                step="1"
+                                value="${manualCount}"
+                                ${devModeEnabled ? '' : 'disabled'}
+                                onchange="commitManualCount(this)"
+                                onblur="commitManualCount(this)"
+                                onkeydown="if (event.key === 'Enter') { event.preventDefault(); commitManualCount(this); this.blur(); }"
+                                style="width:90px; padding:4px 6px; border-radius:4px; border:1px solid var(--vscode-input-border); background:var(--vscode-input-background); color:var(--vscode-input-foreground);"
+                            />
+                            <span style="font-size:11px; color:var(--vscode-descriptionForeground);">${devModeEnabled ? 'Dev mode is on' : 'Dev mode is off'}</span>
+                        </div>
                     </div>
                     ${timestampLines}
                 </div>
@@ -142,9 +191,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         return `
         <div id="analytics-container">
-            <h2 style="margin-top: 0;">Your Error Profile</h2>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:0; margin-bottom:10px;">
+                <h2 style="margin:0;">Your Error Profile</h2>
+                <button
+                    id="devModeBtn"
+                    class="dev-mode-btn ${devModeEnabled ? 'enabled' : 'disabled'}"
+                    onclick="toggleDevMode()"
+                    title="Toggle manual count editing"
+                >
+                    Dev Mode: ${devModeEnabled ? 'ON' : 'OFF'}
+                </button>
+            </div>
             <p style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 15px;">
-                Click the arrow to expand and see when you made each mistake.
+                Click the arrow to expand. When dev mode is on, you can manually change the count for any error type.
             </p>
             ${errorBlocks}
         </div>
@@ -166,6 +225,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getHtml() {
+        const devModeEnabled = this.assistant.isDevModeEnabled();
         return `
             <!DOCTYPE html>
             <html lang="en">
@@ -317,6 +377,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         padding: 4px 0;
                         word-wrap: break-word;
                     }
+
+                    .dev-mode-btn {
+                        border: 1px solid var(--vscode-panel-border);
+                        border-radius: 999px;
+                        padding: 6px 10px;
+                        font-size: 11px;
+                        cursor: pointer;
+                        color: var(--vscode-button-foreground);
+                        background: var(--vscode-button-background);
+                    }
+
+                    .dev-mode-btn.enabled {
+                        background: var(--vscode-testing-iconPassed);
+                        color: white;
+                    }
+
+                    .dev-mode-btn.disabled {
+                        opacity: 0.9;
+                    }
                 </style>
             </head>
             <body>
@@ -355,6 +434,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const content = document.getElementById("content");
                     const stopBtn = document.getElementById("stopBtn");
                     const hintPanel = document.getElementById("hintPanel");
+                    let devModeEnabled = ${devModeEnabled ? 'true' : 'false'};
                     let userIsScrolling = false;
 
                     content.addEventListener('wheel', () => {
@@ -367,6 +447,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             vscode.postMessage({ command: 'hideHintPrompt' });
                         }
                         vscode.postMessage({ command: 'requestMoreHelp', action: type });
+                    }
+
+                    function toggleDevMode() {
+                        if (devModeEnabled) {
+                            commitAllManualCounts();
+                        }
+                        devModeEnabled = !devModeEnabled;
+                        syncDevModeUI();
+                        vscode.postMessage({ command: 'toggleDevMode', enabled: devModeEnabled });
+                    }
+
+                    function commitManualCount(input) {
+                        if (!input || input.disabled) {
+                            return;
+                        }
+
+                        const errorType = input.dataset.errorType;
+                        const parsed = parseInt(input.value, 10);
+                        if (Number.isNaN(parsed)) {
+                            return;
+                        }
+                        input.value = String(parsed);
+                        vscode.postMessage({ command: 'setManualCount', errorType, count: parsed });
+                    }
+
+                    function commitAllManualCounts() {
+                        document.querySelectorAll('.manual-count-input').forEach((input) => {
+                            commitManualCount(input);
+                        });
+                    }
+
+                    function syncDevModeUI() {
+                        const devModeBtn = document.getElementById('devModeBtn');
+                        if (devModeBtn) {
+                            devModeBtn.textContent = 'Dev Mode: ' + (devModeEnabled ? 'ON' : 'OFF');
+                            devModeBtn.classList.toggle('enabled', devModeEnabled);
+                            devModeBtn.classList.toggle('disabled', !devModeEnabled);
+                        }
+
+                        document.querySelectorAll('.manual-count-input').forEach((input) => {
+                            input.disabled = !devModeEnabled;
+                        });
                     }
 
                     function stopGen() {
@@ -433,6 +555,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             hintPanel.style.display = "block";
                         } else if (message.type === "hint-hidden") {
                             hintPanel.style.display = "none";
+                        } else if (message.type === "dev-mode-state") {
+                            devModeEnabled = !!message.enabled;
+                            syncDevModeUI();
                         }
                     });
                 </script>
